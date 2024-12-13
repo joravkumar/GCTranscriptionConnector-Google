@@ -288,11 +288,7 @@ export default async function handleRequest(request) {
         generation_config: {
           candidate_count: 1,
           max_output_tokens: 1024,
-          temperature: 0.7,
-          top_p: 0.95,
-          top_k: 40,
-          presence_penalty: 0,
-          frequency_penalty: 0,
+          temperature: 0.2,
           response_modalities: ["TEXT","AUDIO"],
           speech_config: {
             voice_config: {

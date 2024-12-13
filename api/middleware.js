@@ -22,16 +22,30 @@ export const config = {
  * but it is fully functional. In a real production environment, you would use proper DSP libraries for audio conversion.
  */
 
-import { SYSTEM_PROMPT } from './systemPrompt';
-
 const GEMINI_URL = "wss://generativelanguage.googleapis.com/v1alpha/models:bidigeneratecontent";
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || 'YOUR_API_KEY';
 
-// Environment variables with defaults
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp";
 const GEMINI_TEMPERATURE = parseFloat(process.env.GEMINI_TEMPERATURE || "0.2");
-const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || "1024");
+const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || "4096");
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || "Kore";
+
+
+
+const SYSTEM_PROMPT = `You are a professional and friendly voice assistant. Your responses should be:
+- Clear and concise, typically 1-3 sentences
+- Natural and conversational in tone
+- Direct and to-the-point without unnecessary pleasantries
+- Focused on providing immediate value
+- Professional but warm
+When responding to queries:
+- Get straight to the answer
+- Use a calm, steady speaking pace
+- Avoid complex technical jargon unless specifically requested
+- Confirm understanding when appropriate
+- Ask for clarification only when absolutely necessary`.trim();
+
+
 
 // PCMU <-> PCM conversion tables/functions (G.711 μ-law)
 const MULAW_MAX = 0x1FFF;
@@ -284,7 +298,7 @@ export default async function handleRequest(request) {
   }
 
   // Initialize Gemini session
-  async function initGeminiSession() {
+async function initGeminiSession() {
     geminiWebSocket = new WebSocket(GEMINI_URL, []);
     geminiWebSocket.accept();
     

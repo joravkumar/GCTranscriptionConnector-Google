@@ -4,13 +4,12 @@ export const config = {
 
 /**
  * This code implements a middleware connecting Genesys Cloud AudioHook (Audio Connector flavor)
- * to Google's Gemini Multimodal Live API. It:
- * - Establishes a WebSocket connection with Genesys Cloud.
- * - Negotiates session parameters using the AudioHook protocol.
- * - Forwards incoming audio from Genesys (in PCMU@8kHz) to Gemini (PCM@24kHz) after transcoding.
- * - Forwards Gemini responses (text and audio) back to Genesys (transcoding from PCM@24kHz to PCMU@8kHz).
- * - Handles pause/resume, updates, and other AudioHook protocol messages.
- * - Integrates Gemini by setting up a bidi session, sending user turns (text/audio) and receiving model responses.
+ * to Google's Gemini Multimodal Live API using Ably as the WebSocket manager. It:
+ * - Uses Ably for real-time communication
+ * - Negotiates session parameters using the AudioHook protocol
+ * - Forwards incoming audio from Genesys (in PCMU@8kHz) to Gemini (PCM@24kHz) after transcoding
+ * - Forwards Gemini responses back to Genesys
+ * - Handles AudioHook protocol messages
  * 
  * This code attempts to be "production-ready":
  * - Fully implemented transcoding (PCMU <-> PCM).
@@ -22,8 +21,11 @@ export const config = {
  * but it is fully functional. In a real production environment, you would use proper DSP libraries for audio conversion.
  */
 
-const GEMINI_URL = "wss://generativelanguage.googleapis.com/v1alpha/models:bidigeneratecontent";
+import * as Ably from 'ably';
+
+const ABLY_API_KEY = process.env.ABLY_API_KEY;
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY;
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1alpha/models:streamGenerateContent";
 
 // Environment variables with defaults
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp";
@@ -43,7 +45,6 @@ const LOG_LEVELS = {
   ERROR: 'ERROR'
 };
 
-// Enhanced logging function
 function log(level, message, data = null) {
   const timestamp = new Date().toISOString();
   const logEntry = {
@@ -52,8 +53,6 @@ function log(level, message, data = null) {
     message,
     data
   };
-  
-  // In production, you might want to send this to a logging service
   console.log(JSON.stringify(logEntry));
 }
 
@@ -197,13 +196,6 @@ export default async function handleRequest(request) {
     headers: Object.fromEntries(request.headers)
   });
 
-  // Validate WebSocket upgrade
-  const upgradeHeader = request.headers.get('Upgrade');
-  if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-    log(LOG_LEVELS.ERROR, 'Invalid WebSocket upgrade request');
-    return new Response('Not a WebSocket request', { status: 400 });
-  }
-
   // Validate AudioHook headers
   const organizationId = request.headers.get('Audiohook-Organization-Id');
   const correlationId = request.headers.get('Audiohook-Correlation-Id');
@@ -226,8 +218,16 @@ export default async function handleRequest(request) {
     return new Response('Invalid API key', { status: 401 });
   }
 
-  const [client, server] = Object.values(new WebSocketPair());
-  server.accept();
+  // Initialize Ably
+  const ably = new Ably.Realtime({ key: process.env.ABLY_API_KEY });
+  
+  // Create unique channel names for this session
+  const audioChannelName = `audiohook:${sessionId}:audio`;
+  const controlChannelName = `audiohook:${sessionId}:control`;
+  
+  // Set up Ably channels
+  const audioChannel = ably.channels.get(audioChannelName);
+  const controlChannel = ably.channels.get(controlChannelName);
 
   // Session state
   let audiohookSessionOpen = false;
@@ -287,7 +287,7 @@ export default async function handleRequest(request) {
       position: msg.position
     });
     
-    server.send(JSON.stringify(msg));
+    controlChannel.publish('audiohook', msg);
   }
 
   function sendErrorToGenesys(code, message) {
@@ -336,7 +336,7 @@ export default async function handleRequest(request) {
           
           const pcmData = base64ToUint8Array(part.raw_audio);
           const pcmuData = transcodePCMtoPCMU(pcmData);
-          server.send(pcmuData.buffer);
+          audioChannel.publish('audio', pcmuData.buffer);
         } else if (part.function_call) {
           log(LOG_LEVELS.DEBUG, 'Processing Gemini function call', {
             functionName: part.function_call.name
@@ -379,7 +379,6 @@ export default async function handleRequest(request) {
     log(LOG_LEVELS.INFO, 'Initializing Gemini session');
     
     geminiWebSocket = new WebSocket(GEMINI_URL, []);
-    geminiWebSocket.accept();
     
     geminiWebSocket.addEventListener('open', () => {
       log(LOG_LEVELS.INFO, 'Gemini WebSocket connected');
@@ -426,10 +425,11 @@ export default async function handleRequest(request) {
       handleGeminiMessage(msg);
     });
 
-	geminiWebSocket.addEventListener('close', () => {
+    geminiWebSocket.addEventListener('close', () => {
       log(LOG_LEVELS.INFO, 'Gemini WebSocket closed', {
         sessionDuration: Date.now() - sessionStartTime
       });
+      ably.close();
     });
 
     geminiWebSocket.addEventListener('error', (error) => {
@@ -499,78 +499,38 @@ export default async function handleRequest(request) {
     totalAudioProcessed += pcmuData.length;
   }
 
-  function handleCloseTransaction() {
-    log(LOG_LEVELS.INFO, 'Starting close transaction');
+  // Set up Ably channel subscriptions
+  await audioChannel.subscribe('audio', (msg) => {
+    if (!audiohookSessionOpen) {
+      log(LOG_LEVELS.WARN, 'Received audio before session open');
+      return;
+    }
+
+    const pcmuData = new Uint8Array(msg.data);
     
-    closeTransactionComplete = false;
-    closeTransactionTimer = setTimeout(() => {
-      if (!closeTransactionComplete) {
-        log(LOG_LEVELS.ERROR, 'Close transaction timeout');
-        sendErrorToGenesys(408, "Close transaction timeout");
-        server.close();
-      }
-    }, CLOSE_TIMEOUT_MS);
-  }
-
-  function logSessionMetrics() {
-    const sessionDuration = Date.now() - sessionStartTime;
-    const avgRtt = rttHistory.length > 0 ? 
-      rttHistory.reduce((a, b) => a + b, 0) / rttHistory.length : 
-      null;
-
-    log(LOG_LEVELS.INFO, 'Session metrics', {
-      duration: sessionDuration,
-      totalAudioProcessed,
-      totalMessagesProcessed,
-      averageRtt: avgRtt,
-      samplesProcessed,
-      samplesPaused
-    });
-  }
-
-  server.addEventListener('message', async evt => {
-    const data = evt.data;
-    totalMessagesProcessed++;
-
-    if (data instanceof ArrayBuffer) {
-      if (!audiohookSessionOpen) {
-        log(LOG_LEVELS.WARN, 'Received audio before session open');
-        return;
-      }
-
-      const pcmuData = new Uint8Array(data);
+    if (!clientPaused && !serverPaused) {
+      const samplesInFrame = pcmuData.length;
+      samplesProcessed += samplesInFrame;
       
-      if (!clientPaused && !serverPaused) {
-        const samplesInFrame = pcmuData.length;
-        samplesProcessed += samplesInFrame;
-        
-        log(LOG_LEVELS.DEBUG, 'Processing audio frame', {
-          frameSize: samplesInFrame,
-          totalProcessed: samplesProcessed
-        });
-        
-        sendAudioToGemini(pcmuData);
-      } else if (lastPauseTimestamp) {
-        samplesPaused += pcmuData.length;
-        
-        log(LOG_LEVELS.DEBUG, 'Skipping audio frame (paused)', {
-          frameSize: pcmuData.length,
-          totalPaused: samplesPaused
-        });
-      }
-      return;
-    }
-
-    let message;
-    try {
-      message = JSON.parse(data);
-    } catch (e) {
-      log(LOG_LEVELS.ERROR, 'Failed to parse message from Genesys', {
-        error: e.message,
-        data
+      log(LOG_LEVELS.DEBUG, 'Processing audio frame', {
+        frameSize: samplesInFrame,
+        totalProcessed: samplesProcessed
       });
-      return;
+      
+      sendAudioToGemini(pcmuData);
+    } else if (lastPauseTimestamp) {
+      samplesPaused += pcmuData.length;
+      
+      log(LOG_LEVELS.DEBUG, 'Skipping audio frame (paused)', {
+        frameSize: pcmuData.length,
+        totalPaused: samplesPaused
+      });
     }
+  });
+
+  await controlChannel.subscribe('audiohook', async (msg) => {
+    const message = msg.data;
+    totalMessagesProcessed++;
 
     serverSeq = message.seq;
     const { type, parameters = {} } = message;
@@ -721,7 +681,7 @@ export default async function handleRequest(request) {
         if (geminiWebSocket) {
           geminiWebSocket.close();
         }
-        server.close();
+        ably.close();
         break;
       }
 
@@ -733,7 +693,7 @@ export default async function handleRequest(request) {
         if (geminiWebSocket) {
           geminiWebSocket.close();
         }
-        server.close();
+        ably.close();
         break;
       }
 
@@ -759,18 +719,51 @@ export default async function handleRequest(request) {
     }
   });
 
-  server.addEventListener('error', (error) => {
-    log(LOG_LEVELS.ERROR, 'WebSocket error', {
+  function handleCloseTransaction() {
+    log(LOG_LEVELS.INFO, 'Starting close transaction');
+    
+    closeTransactionComplete = false;
+    closeTransactionTimer = setTimeout(() => {
+      if (!closeTransactionComplete) {
+        log(LOG_LEVELS.ERROR, 'Close transaction timeout');
+        sendErrorToGenesys(408, "Close transaction timeout");
+        ably.close();
+      }
+    }, CLOSE_TIMEOUT_MS);
+  }
+
+  function logSessionMetrics() {
+    const sessionDuration = Date.now() - sessionStartTime;
+    const avgRtt = rttHistory.length > 0 ? 
+      rttHistory.reduce((a, b) => a + b, 0) / rttHistory.length : 
+      null;
+
+    log(LOG_LEVELS.INFO, 'Session metrics', {
+      duration: sessionDuration,
+      totalAudioProcessed,
+      totalMessagesProcessed,
+      averageRtt: avgRtt,
+      samplesProcessed,
+      samplesPaused
+    });
+  }
+
+  // Set up error handling for Ably
+  ably.connection.on('failed', (error) => {
+    log(LOG_LEVELS.ERROR, 'Ably connection failed', {
       error: error.message
     });
     
     if (closeTransactionTimer) {
       clearTimeout(closeTransactionTimer);
     }
+    if (geminiWebSocket) {
+      geminiWebSocket.close();
+    }
   });
 
-  server.addEventListener('close', () => {
-    log(LOG_LEVELS.INFO, 'WebSocket closed');
+  ably.connection.on('closed', () => {
+    log(LOG_LEVELS.INFO, 'Ably connection closed');
     
     if (closeTransactionTimer) {
       clearTimeout(closeTransactionTimer);
@@ -782,8 +775,12 @@ export default async function handleRequest(request) {
     logSessionMetrics();
   });
 
+  await ably.connection.once('connected');
+  
   return new Response(null, {
-    status: 101,
-    webSocket: client
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json'
+    }
   });
-}
+} 

@@ -1,3 +1,7 @@
+export const config = {
+  runtime: 'edge',
+};
+
 /**
  * This code implements a middleware connecting Genesys Cloud AudioHook (Audio Connector flavor)
  * to Google's Gemini Multimodal Live API using Ably as the WebSocket manager. It:

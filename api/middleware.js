@@ -286,7 +286,6 @@ export default async function handleRequest(request) {
         "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentSetup",
         model: GEMINI_MODEL,
         generation_config: {
-          candidate_count: 1,
           max_output_tokens: 1024,
           temperature: 0.2,
           response_modalities: ["TEXT","AUDIO"],

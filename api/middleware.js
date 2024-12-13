@@ -23,7 +23,7 @@ export const config = {
  */
 
 const GEMINI_URL = "wss://generativelanguage.googleapis.com/v1alpha/models:bidigeneratecontent";
-const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || 'YOUR_API_KEY';
+const GEMINI_API_KEY = process.env.GOOGLE_API_KEY;
 
 // Environment variables with defaults
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp";

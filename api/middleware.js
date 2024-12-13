@@ -25,12 +25,15 @@ export const config = {
 const GEMINI_URL = "wss://generativelanguage.googleapis.com/v1alpha/models:bidigeneratecontent";
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || 'YOUR_API_KEY';
 
+// Environment variables with defaults
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp";
 const GEMINI_TEMPERATURE = parseFloat(process.env.GEMINI_TEMPERATURE || "0.2");
 const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || "4096");
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || "Kore";
 
-
+// Constants
+const CLOSE_TIMEOUT_MS = 10000; // 10 seconds timeout for close transaction
+const HISTORY_BUFFER_SECONDS = 20; // AudioHook keeps 20s buffer
 
 const SYSTEM_PROMPT = `You are a professional and friendly voice assistant. Your responses should be:
 - Clear and concise, typically 1-3 sentences
@@ -44,8 +47,6 @@ When responding to queries:
 - Avoid complex technical jargon unless specifically requested
 - Confirm understanding when appropriate
 - Ask for clarification only when absolutely necessary`.trim();
-
-
 
 // PCMU <-> PCM conversion tables/functions (G.711 μ-law)
 const MULAW_MAX = 0x1FFF;
@@ -173,16 +174,31 @@ function uint8ArrayToBase64(u8) {
 }
 
 export default async function handleRequest(request) {
+  // Validate WebSocket upgrade
   const upgradeHeader = request.headers.get('Upgrade');
   if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
     return new Response('Not a WebSocket request', { status: 400 });
+  }
+
+  // Validate required AudioHook headers
+  const organizationId = request.headers.get('Audiohook-Organization-Id');
+  const correlationId = request.headers.get('Audiohook-Correlation-Id');
+  const sessionId = request.headers.get('Audiohook-Session-Id');
+  const apiKey = request.headers.get('X-API-KEY');
+
+  if (!organizationId || !correlationId || !sessionId || !apiKey) {
+    return new Response('Missing required AudioHook headers', { status: 400 });
+  }
+
+  // Validate API key
+  if (apiKey !== process.env.EXPECTED_API_KEY) {
+    return new Response('Invalid API key', { status: 401 });
   }
 
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
 
   // Session state
-  const sessionId = crypto.randomUUID();
   let audiohookSessionOpen = false;
   let geminiSessionOpen = false;
   let geminiWebSocket = null;
@@ -192,16 +208,24 @@ export default async function handleRequest(request) {
   // Pause states
   let clientPaused = false;   
   let serverPaused = false;   
+  
+  // Close transaction state
+  let closeTransactionTimer = null;
+  let closeTransactionComplete = false;
 
-  // Track audio position in samples. 
-  // position in seconds = samplesProcessed / 8000 (since original timeline in AudioHook is at 8k)
-  // We'll maintain all position computations at 8k rate to match AudioHook's position reference.
+  // Position tracking (at 8kHz rate to match AudioHook)
   let samplesProcessed = 0;
+  let samplesPaused = 0;
+  let lastPauseTimestamp = null;
+
+  // RTT tracking for ping/pong
+  let lastPingTimestamp = null;
+  let lastRtt = null;
 
   function positionToDurationStr(samples) {
     // Convert samples @8kHz to ISO8601 Duration
     const seconds = samples / 8000;
-    return `PT${seconds.toFixed(5)}S`;
+    return `PT${seconds.toFixed(3)}S`;
   }
 
   function nextClientSeq() {
@@ -217,7 +241,6 @@ export default async function handleRequest(request) {
       seq: nextClientSeq(),
       serverseq: serverSeq,
       id: sessionId,
-      // Position is always the "virtual" position at 8k rate
       position: positionToDurationStr(samplesProcessed),
       parameters: params || {}
     };
@@ -261,10 +284,6 @@ export default async function handleRequest(request) {
           const pcmuData = transcodePCMtoPCMU(pcmData);
           // Send as binary frames to Genesys
           server.send(pcmuData.buffer);
-          // Advance position by samples in 8k domain?
-          // Actually, audio from Gemini is not from the client's perspective.
-          // For AudioHook, we only track outgoing (client) audio. The position reflects client input timeline, 
-          // not server audio. We do not modify samplesProcessed for Gemini responses.
         } else if (part.function_call) {
           // Respond to function call with empty result
           const funcCall = part.function_call;
@@ -298,7 +317,7 @@ export default async function handleRequest(request) {
   }
 
   // Initialize Gemini session
-async function initGeminiSession() {
+  async function initGeminiSession() {
     geminiWebSocket = new WebSocket(GEMINI_URL, []);
     geminiWebSocket.accept();
     
@@ -313,8 +332,8 @@ async function initGeminiSession() {
           response_modalities: ["TEXT","AUDIO"],
           speech_config: {
             voice_config: {
-              prebuilt_voice_config: {
-                voice_name: GEMINI_VOICE_NAME
+              prebuilt_voice_config: {			
+				voice_name: GEMINI_VOICE_NAME
               }
             }
           }
@@ -373,17 +392,38 @@ async function initGeminiSession() {
     geminiWebSocket.send(JSON.stringify(realtimeInputMsg));
   }
 
+  // Handle starting close transaction
+  function handleCloseTransaction() {
+    closeTransactionComplete = false;
+    // Set timeout for close transaction
+    closeTransactionTimer = setTimeout(() => {
+      if (!closeTransactionComplete) {
+        sendErrorToGenesys(408, "Close transaction timeout");
+        server.close();
+      }
+    }, CLOSE_TIMEOUT_MS);
+  }
+
   server.addEventListener('message', async evt => {
     const data = evt.data;
 
     if (data instanceof ArrayBuffer) {
+      // Don't process audio before session is open
+      if (!audiohookSessionOpen) return;
+
       // Binary audio frame from Genesys
       const pcmuData = new Uint8Array(data);
-      // Update samplesProcessed based on how many samples are in this frame at 8kHz:
-      const samplesInFrame = pcmuData.length; 
-      samplesProcessed += samplesInFrame;
-      // Forward to Gemini
-      sendAudioToGemini(pcmuData);
+      
+      // Don't process audio while paused
+      if (!clientPaused && !serverPaused) {
+        // Update samplesProcessed based on how many samples are in this frame at 8kHz:
+        const samplesInFrame = pcmuData.length; 
+        samplesProcessed += samplesInFrame;
+        // Forward to Gemini
+        sendAudioToGemini(pcmuData);
+      } else if (lastPauseTimestamp) {
+        samplesPaused += pcmuData.length;
+      }
       return;
     }
 
@@ -400,25 +440,57 @@ async function initGeminiSession() {
 
     switch (type) {
       case 'open': {
-        // Pick a media format
-        const offeredMedia = parameters.media || [];
-        const chosenMedia = offeredMedia.length > 0 ? [offeredMedia[0]] : [];
+        // Validate open parameters
+        const media = parameters.media || [];
+        if (!media.length) {
+          sendErrorToGenesys(400, "No media formats offered");
+          return;
+        }
+
+        // Find supported PCMU format
+        const pcmuFormat = media.find(m => 
+          m.type === 'audio' && 
+          m.format === 'PCMU' && 
+          m.rate === 8000
+        );
+
+        if (!pcmuFormat) {
+          sendErrorToGenesys(415, "No supported media format offered");
+          return;
+        }
+
+        // Session initialization
+        audiohookSessionOpen = true;
+        samplesProcessed = 0;
+        samplesPaused = 0;
+        lastPauseTimestamp = null;
+        
+        // Accept the session
         sendToGenesys("opened", {
           startPaused: false,
-          media: chosenMedia
-        }, { clientseq: message.seq });
-        
-        audiohookSessionOpen = true;
+          media: [pcmuFormat]
+        }, {
+          clientseq: message.seq
+        });
+
+        // Initialize Gemini after accepting AudioHook session
         await initGeminiSession();
+
+        // Send initial pings for RTT baseline
+        setTimeout(() => {
+          lastPingTimestamp = Date.now();
+          sendToGenesys("ping", {});
+        }, 1000);
         break;
       }
 
       case 'update': {
         // Language changed or other updates
         if (parameters.language) {
-          // Could send a system instruction update to Gemini if needed, but Gemini doesn't support live updates.
-          // We'll just log it.
+          // Could send a system instruction update to Gemini if needed
           console.log("Language updated:", parameters.language);
+          // Send updated acknowledgment
+          sendToGenesys("updated", {}, {clientseq: message.seq});
         }
         break;
       }
@@ -436,50 +508,84 @@ async function initGeminiSession() {
         break;
       }
 
-      case 'ping':
+      case 'ping': {
+        // Track timestamp for RTT calculation
+        lastPingTimestamp = Date.now();
         // Respond with pong
         sendToGenesys("pong", {}, {clientseq: message.seq});
         break;
+      }
 
-      case 'pause':
+      case 'pong': {
+        // Calculate RTT if we have a ping timestamp
+        if (lastPingTimestamp) {
+          lastRtt = Date.now() - lastPingTimestamp;
+          lastPingTimestamp = null;
+        }
+        break;
+      }
+
+      case 'pause': {
         // Server requested pause
         serverPaused = true;
+        lastPauseTimestamp = Date.now();
         sendToGenesys("paused", {}, {clientseq: message.seq});
         break;
+      }
 
-      case 'resume':
+      case 'resume': {
         // Server requested resume
         serverPaused = false;
         if (!clientPaused) {
           sendToGenesys("resumed", {
             start: positionToDurationStr(samplesProcessed),
-            discarded: "PT0S"
+            discarded: positionToDurationStr(samplesPaused)
           }, {clientseq: message.seq});
+          // Reset pause tracking
+          samplesPaused = 0;
+          lastPauseTimestamp = null;
         } else {
           // Still client paused
           sendToGenesys("paused", {}, {clientseq: message.seq});
         }
         break;
+      }
 
-      case 'close':
-        // Conversation ended
+      case 'close': {
+        // Start close transaction
+        handleCloseTransaction();
+        // Send final events or process queue
+        // Then send closed
         sendToGenesys("closed", {}, {clientseq: message.seq});
+        closeTransactionComplete = true;
+        // Cleanup
+        if (closeTransactionTimer) {
+          clearTimeout(closeTransactionTimer);
+        }
         if (geminiWebSocket) {
           geminiWebSocket.close();
         }
         server.close();
         break;
+      }
 
-      // Server-side messages that shouldn't appear here or we can ignore safely:
+      case 'disconnect': {
+        // Server wants to end session
+        if (geminiWebSocket) {
+          geminiWebSocket.close();
+        }
+        server.close();
+        break;
+      }
+
+      // Handle unexpected messages
       case 'reconnect':
-      case 'disconnect':
       case 'error':
       case 'discarded':
       case 'opened':
       case 'closed':
       case 'paused':
       case 'resumed':
-      case 'pong':
       case 'updated':
         console.log("Received unexpected or server-side-only message type:", type);
         break;
@@ -488,6 +594,22 @@ async function initGeminiSession() {
         // Unknown message type
         sendErrorToGenesys(405, `Unknown message type: ${type}`);
         break;
+    }
+  });
+
+  server.addEventListener('error', (error) => {
+    console.error('WebSocket error:', error);
+    if (closeTransactionTimer) {
+      clearTimeout(closeTransactionTimer);
+    }
+  });
+
+  server.addEventListener('close', () => {
+    if (closeTransactionTimer) {
+      clearTimeout(closeTransactionTimer);
+    }
+    if (geminiWebSocket) {
+      geminiWebSocket.close();
     }
   });
 

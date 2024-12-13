@@ -3,7 +3,7 @@
   "functions": {
     "api/middleware.js": {
       "memory": 1024,
-      "maxDuration": 300
+      "maxDuration": 25
     }
   },
   "routes": [

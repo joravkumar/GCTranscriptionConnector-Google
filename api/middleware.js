@@ -37,23 +37,6 @@ const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || "Kore";
 const CLOSE_TIMEOUT_MS = 10000;
 const HISTORY_BUFFER_SECONDS = 20;
 
-// Logging levels
-const LOG_LEVELS = {
-  DEBUG: 'DEBUG',
-  INFO: 'INFO',
-  WARN: 'WARN',
-  ERROR: 'ERROR'
-};
-
-function log(level, message, data = null) {
-  console.log(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    data
-  }));
-}
-
 const SYSTEM_PROMPT = `You are a professional and friendly voice assistant. Your responses should be:
 - Clear and concise, typically 1-3 sentences
 - Natural and conversational in tone
@@ -98,464 +81,463 @@ function mulawEncode(sample) {
 }
 
 function transcodePCMUtoPCM(pcmuData) {
-  const startTime = performance.now();
-  
-  const len = pcmuData.length;
-  const pcm8k = new Int16Array(len);
-  
-  // Decode to 16-bit signed PCM
-  for (let i = 0; i < len; i++) {
-    pcm8k[i] = mulawDecode(pcmuData[i]);
-  }
+ const startTime = performance.now();
+ 
+ const len = pcmuData.length;
+ const pcm8k = new Int16Array(len);
+ 
+ // Decode to 16-bit signed PCM
+ for (let i = 0; i < len; i++) {
+   pcm8k[i] = mulawDecode(pcmuData[i]);
+ }
 
-  // Upsample to 24kHz
-  const outLen = len * 3;
-  const pcm24k = new Int16Array(outLen);
-  
-  for (let i = 0; i < len - 1; i++) {
-    const s1 = pcm8k[i], s2 = pcm8k[i+1];
-    pcm24k[i*3] = s1;
-    pcm24k[i*3+1] = Math.round((2*s1 + s2)/3);
-    pcm24k[i*3+2] = Math.round((s1 + 2*s2)/3);
-  }
-  
-  // Handle last sample
-  pcm24k[(len-1)*3] = pcm8k[len-1];
-  pcm24k[(len-1)*3+1] = pcm8k[len-1];
-  pcm24k[(len-1)*3+2] = pcm8k[len-1];
+ // Upsample to 24kHz
+ const outLen = len * 3;
+ const pcm24k = new Int16Array(outLen);
+ 
+ for (let i = 0; i < len - 1; i++) {
+   const s1 = pcm8k[i], s2 = pcm8k[i+1];
+   pcm24k[i*3] = s1;
+   pcm24k[i*3+1] = Math.round((2*s1 + s2)/3);
+   pcm24k[i*3+2] = Math.round((s1 + 2*s2)/3);
+ }
+ 
+ // Handle last sample
+ pcm24k[(len-1)*3] = pcm8k[len-1];
+ pcm24k[(len-1)*3+1] = pcm8k[len-1];
+ pcm24k[(len-1)*3+2] = pcm8k[len-1];
 
-  // Convert to bytes
-  const bytes = new Uint8Array(pcm24k.length*2);
-  let offset = 0;
-  for (let i = 0; i < pcm24k.length; i++) {
-    const val = pcm24k[i];
-    bytes[offset++] = val & 0xff;
-    bytes[offset++] = (val >> 8) & 0xff;
-  }
+ // Convert to bytes
+ const bytes = new Uint8Array(pcm24k.length*2);
+ let offset = 0;
+ for (let i = 0; i < pcm24k.length; i++) {
+   const val = pcm24k[i];
+   bytes[offset++] = val & 0xff;
+   bytes[offset++] = (val >> 8) & 0xff;
+ }
 
-  const duration = performance.now() - startTime;
-  log(LOG_LEVELS.DEBUG, 'PCMUtoPCM transcoding completed', {
-    inputSamples: len,
-    outputSamples: outLen,
-    durationMs: duration.toFixed(2)
-  });
+ const duration = performance.now() - startTime;
+ console.log('PCMUtoPCM transcoding completed:', {
+   inputSamples: len,
+   outputSamples: outLen, 
+   durationMs: duration.toFixed(2)
+ });
 
-  return bytes;
+ return bytes;
 }
 
 function transcodePCMtoPCMU(pcmData) {
-  const startTime = performance.now();
-  
-  const samples = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength/2);
-  const len8k = Math.floor(samples.length / 3);
-  
-  // Downsample
-  const pcm8k = new Int16Array(len8k);
-  for (let i = 0; i < len8k; i++) {
-    pcm8k[i] = samples[i*3];
-  }
+ const startTime = performance.now();
+ 
+ const samples = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength/2);
+ const len8k = Math.floor(samples.length / 3);
+ 
+ // Downsample
+ const pcm8k = new Int16Array(len8k);
+ for (let i = 0; i < len8k; i++) {
+   pcm8k[i] = samples[i*3];
+ }
 
-  // Encode to μ-law
-  const ulaw = new Uint8Array(len8k);
-  for (let i = 0; i < len8k; i++) {
-    ulaw[i] = mulawEncode(pcm8k[i]);
-  }
+ // Encode to μ-law
+ const ulaw = new Uint8Array(len8k);
+ for (let i = 0; i < len8k; i++) {
+   ulaw[i] = mulawEncode(pcm8k[i]);
+ }
 
-  const duration = performance.now() - startTime;
-  log(LOG_LEVELS.DEBUG, 'PCMtoPCMU transcoding completed', {
-    inputSamples: samples.length,
-    outputSamples: len8k,
-    durationMs: duration.toFixed(2)
-  });
+ const duration = performance.now() - startTime;
+ console.log('PCMtoPCMU transcoding completed:', {
+   inputSamples: samples.length,
+   outputSamples: len8k,
+   durationMs: duration.toFixed(2)
+ });
 
-  return ulaw;
+ return ulaw;
 }
 
 function base64ToUint8Array(b64) {
-  const binaryStr = atob(b64);
-  const len = binaryStr.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
-  return bytes;
+ const binaryStr = atob(b64);
+ const len = binaryStr.length;
+ const bytes = new Uint8Array(len);
+ for (let i = 0; i < len; i++) {
+   bytes[i] = binaryStr.charCodeAt(i);
+ }
+ return bytes;
 }
 
 function uint8ArrayToBase64(u8) {
-  let str = '';
-  for (let i=0; i<u8.length; i++) {
-    str += String.fromCharCode(u8[i]);
-  }
-  return btoa(str);
+ let str = '';
+ for (let i=0; i<u8.length; i++) {
+   str += String.fromCharCode(u8[i]);
+ }
+ return btoa(str);
 }
 
 export default async function handleRequest(request) {
-  log(LOG_LEVELS.INFO, 'New connection request received', {
-    headers: Object.fromEntries(request.headers)
-  });
+ console.log('New connection request received:', {
+   headers: Object.fromEntries(request.headers)
+ });
 
-  // Validate AudioHook headers
-  const organizationId = request.headers.get('Audiohook-Organization-Id');
-  const correlationId = request.headers.get('Audiohook-Correlation-Id');
-  const sessionId = request.headers.get('Audiohook-Session-Id');
-  const apiKey = request.headers.get('X-API-KEY');
+ // Validate AudioHook headers
+ const organizationId = request.headers.get('Audiohook-Organization-Id');
+ const correlationId = request.headers.get('Audiohook-Correlation-Id');
+ const sessionId = request.headers.get('Audiohook-Session-Id');
+ const apiKey = request.headers.get('X-API-KEY');
 
-  if (!organizationId || !correlationId || !sessionId || !apiKey) {
-    log(LOG_LEVELS.ERROR, 'Missing required headers', {
-      organizationId: !!organizationId,
-      correlationId: !!correlationId,
-      sessionId: !!sessionId,
-      apiKey: !!apiKey
-    });
-    return new Response('Missing required AudioHook headers', { status: 400 });
-  }
+ if (!organizationId || !correlationId || !sessionId || !apiKey) {
+   console.error('Missing required headers:', {
+     organizationId: !!organizationId,
+     correlationId: !!correlationId,
+     sessionId: !!sessionId,
+     apiKey: !!apiKey
+   });
+   return new Response('Missing required AudioHook headers', { status: 400 });
+ }
 
-  // Validate API key
-  if (apiKey !== process.env.EXPECTED_API_KEY) {
-    log(LOG_LEVELS.ERROR, 'Invalid API key provided');
-    return new Response('Invalid API key', { status: 401 });
-  }
+ // Validate API key
+ if (apiKey !== process.env.EXPECTED_API_KEY) {
+   console.error('Invalid API key provided');
+   return new Response('Invalid API key', { status: 401 });
+ }
 
-  // Initialize Ably
-  console.log('Initializing Ably connection');
-  const ably = new Ably.Realtime({ key: process.env.ABLY_API_KEY });
-  
-  // Create unique channel names for this session
-  const audioChannelName = `audiohook:${sessionId}:audio`;
-  const controlChannelName = `audiohook:${sessionId}:control`;
-  
-  // Set up Ably channels
-  const audioChannel = ably.channels.get(audioChannelName);
-  const controlChannel = ably.channels.get(controlChannelName);
+ // Initialize Ably
+ console.log('Initializing Ably connection');
+ const ably = new Ably.Realtime({ key: process.env.ABLY_API_KEY });
+ 
+ // Create unique channel names for this session
+ const audioChannelName = `audiohook:${sessionId}:audio`;
+ const controlChannelName = `audiohook:${sessionId}:control`;
+ 
+ // Set up Ably channels
+ const audioChannel = ably.channels.get(audioChannelName);
+ const controlChannel = ably.channels.get(controlChannelName);
 
-  // Session state
-  let audiohookSessionOpen = false;
-  let geminiSessionOpen = false;
-  let geminiWebSocket = null;
-  let clientSeq = 0;
-  let serverSeq = 0;
+ // Session state
+ let audiohookSessionOpen = false;
+ let geminiSessionOpen = false;
+ let geminiWebSocket = null;
+ let clientSeq = 0;
+ let serverSeq = 0;
 
-  // Performance metrics
-  let sessionStartTime = Date.now();
-  let totalAudioProcessed = 0;
-  let totalMessagesProcessed = 0;
+ // Performance metrics
+ let sessionStartTime = Date.now();
+ let totalAudioProcessed = 0;
+ let totalMessagesProcessed = 0;
 
-  // Pause states
-  let clientPaused = false;
-  let serverPaused = false;
+ // Pause states
+ let clientPaused = false;
+ let serverPaused = false;
 
-  // Close transaction state
-  let closeTransactionTimer = null;
-  let closeTransactionComplete = false;
+ // Close transaction state
+ let closeTransactionTimer = null;
+ let closeTransactionComplete = false;
 
-  // Position tracking
-  let samplesProcessed = 0;
-  let samplesPaused = 0;
-  let lastPauseTimestamp = null;
+ // Position tracking
+ let samplesProcessed = 0;
+ let samplesPaused = 0;
+ let lastPauseTimestamp = null;
 
-  // RTT tracking
-  let lastPingTimestamp = null;
-  let lastRtt = null;
-  let rttHistory = [];
+ // RTT tracking
+ let lastPingTimestamp = null;
+ let lastRtt = null;
+ let rttHistory = [];
 
-  function positionToDurationStr(samples) {
-    const seconds = samples / 8000;
-    return `PT${seconds.toFixed(3)}S`;
-  }
+ function positionToDurationStr(samples) {
+   const seconds = samples / 8000;
+   return `PT${seconds.toFixed(3)}S`;
+ }
 
-  function nextClientSeq() {
-    clientSeq += 1;
-    return clientSeq;
-  }
+ function nextClientSeq() {
+   clientSeq += 1;
+   return clientSeq;
+ }
 
-  function sendToGenesys(type, params, additionalFields = {}) {
-    const msg = {
-      version: "2",
-      type,
-      seq: nextClientSeq(),
-      serverseq: serverSeq,
-      id: sessionId,
-      position: positionToDurationStr(samplesProcessed),
-      parameters: params || {}
-    };
-    Object.assign(msg, additionalFields);
-    
-    log(LOG_LEVELS.DEBUG, 'Sending message to Genesys', {
-      messageType: type,
-      sequence: msg.seq,
-      position: msg.position
-    });
-    
-    controlChannel.publish('audiohook', msg);
-  }
+ function sendToGenesys(type, params, additionalFields = {}) {
+   const msg = {
+     version: "2",
+     type,
+     seq: nextClientSeq(),
+     serverseq: serverSeq,
+     id: sessionId,
+     position: positionToDurationStr(samplesProcessed),
+     parameters: params || {}
+   };
+   Object.assign(msg, additionalFields);
+   
+   console.log('Sending message to Genesys:', {
+     messageType: type,
+     sequence: msg.seq,
+     position: msg.position
+   });
+   
+   controlChannel.publish('audiohook', msg);
+ }
 
-  function sendErrorToGenesys(code, message) {
-    log(LOG_LEVELS.ERROR, 'Sending error to Genesys', {
-      code,
-      message
-    });
-    
-    sendToGenesys("error", {
-      code,
-      message
-    });
-  }
+ function sendErrorToGenesys(code, message) {
+   console.error('Sending error to Genesys:', {
+     code,
+     message
+   });
+   
+   sendToGenesys("error", {
+     code,
+     message
+   });
+ }
 
-  function handleGeminiMessage(msg) {
-    log(LOG_LEVELS.DEBUG, 'Received message from Gemini', {
-      messageType: msg["@type"] || 'unknown'
-    });
+ function handleGeminiMessage(msg) {
+   console.log('Received message from Gemini:', {
+     messageType: msg["@type"] || 'unknown'
+   });
 
-    if (msg["@type"] && msg["@type"].includes("BidiGenerateContentSetupComplete")) {
-      geminiSessionOpen = true;
-      log(LOG_LEVELS.INFO, 'Gemini session setup complete');
-      return;
-    }
+   if (msg["@type"] && msg["@type"].includes("BidiGenerateContentSetupComplete")) {
+     geminiSessionOpen = true;
+     console.log('Gemini session setup complete');
+     return;
+   }
 
-    if (msg.server_content && msg.server_content.model_turn) {
-      const parts = msg.server_content.model_turn.parts || [];
-      for (const part of parts) {
-        if (part.text !== undefined) {
-          log(LOG_LEVELS.DEBUG, 'Processing Gemini text response', {
-            textLength: part.text.length
-          });
-          
-          sendToGenesys("event", {
-            entities: [
-              {
-                type: "gemini_text",
-                data: { text: part.text }
-              }
-            ]
-          });
-        } else if (part.raw_audio) {
-          log(LOG_LEVELS.DEBUG, 'Processing Gemini audio response', {
-            audioLength: part.raw_audio.length
-          });
-          
-          const pcmData = base64ToUint8Array(part.raw_audio);
-          const pcmuData = transcodePCMtoPCMU(pcmData);
-          audioChannel.publish('audio', pcmuData.buffer);
-        } else if (part.function_call) {
-          log(LOG_LEVELS.DEBUG, 'Processing Gemini function call', {
-            functionName: part.function_call.name
-          });
-          
-          const funcCall = part.function_call;
-          const toolResponse = {
-            "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentToolResponse",
-            function_responses: [
-              {
-                id: funcCall.id,
-                name: funcCall.name,
-                response: "{}"
-              }
-            ]
-          };
-          geminiWebSocket.send(JSON.stringify(toolResponse));
-        }
-      }
-    }
+   if (msg.server_content && msg.server_content.model_turn) {
+     const parts = msg.server_content.model_turn.parts || [];
+     for (const part of parts) {
+       if (part.text !== undefined) {
+         console.log('Processing Gemini text response:', {
+           textLength: part.text.length
+         });
+         
+         sendToGenesys("event", {
+           entities: [
+             {
+               type: "gemini_text",
+               data: { text: part.text }
+             }
+           ]
+         });
+       } else if (part.raw_audio) {
+         console.log('Processing Gemini audio response:', {
+           audioLength: part.raw_audio.length
+         });
+         
+         const pcmData = base64ToUint8Array(part.raw_audio);
+         const pcmuData = transcodePCMtoPCMU(pcmData);
+         audioChannel.publish('audio', pcmuData.buffer);
+       } else if (part.function_call) {
+         console.log('Processing Gemini function call:', {
+           functionName: part.function_call.name
+         });
+         
+         const funcCall = part.function_call;
+         const toolResponse = {
+           "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentToolResponse",
+           function_responses: [
+             {
+               id: funcCall.id,
+               name: funcCall.name,
+               response: "{}"
+             }
+           ]
+         };
+         geminiWebSocket.send(JSON.stringify(toolResponse));
+       }
+     }
+   }
 
-    if (msg.function_calls && msg.function_calls.length > 0) {
-      log(LOG_LEVELS.DEBUG, 'Processing standalone function calls', {
-        callCount: msg.function_calls.length
-      });
-      
-      const toolResponse = {
-        "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentToolResponse",
-        function_responses: msg.function_calls.map(fc => ({
-          id: fc.id,
-          name: fc.name,
-          response: "{}"
-        }))
-      };
-      geminiWebSocket.send(JSON.stringify(toolResponse));
-    }
-  }
+   if (msg.function_calls && msg.function_calls.length > 0) {
+     console.log('Processing standalone function calls:', {
+       callCount: msg.function_calls.length
+     });
+     
+     const toolResponse = {
+       "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentToolResponse",
+       function_responses: msg.function_calls.map(fc => ({
+         id: fc.id,
+         name: fc.name,
+         response: "{}"
+       }))
+     };
+     geminiWebSocket.send(JSON.stringify(toolResponse));
+   }
+ }
 
-  async function initGeminiSession() {
-    log(LOG_LEVELS.INFO, 'Initializing Gemini session');
-    
-    geminiWebSocket = new WebSocket(GEMINI_URL, []);
-    
-    geminiWebSocket.addEventListener('open', () => {
-      log(LOG_LEVELS.INFO, 'Gemini WebSocket connected');
-      
-      const setupMsg = {
-        "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentSetup",
-        model: GEMINI_MODEL,
-        generation_config: {
-          candidate_count: 1,
-          max_output_tokens: GEMINI_MAX_OUTPUT_TOKENS,
-          temperature: GEMINI_TEMPERATURE,
-          response_modalities: ["TEXT","AUDIO"],
-          speech_config: {
-            voice_config: {
-              prebuilt_voice_config: {
-                voice_name: GEMINI_VOICE_NAME
-              }
-            }
-          }
-        },
-        system_instruction: SYSTEM_PROMPT,
-        tools: []
-      };
-      
-      log(LOG_LEVELS.DEBUG, 'Sending Gemini setup message', {
-        model: GEMINI_MODEL,
-        temperature: GEMINI_TEMPERATURE
-      });
-      
-      geminiWebSocket.send(JSON.stringify(setupMsg));
-    });
+ async function initGeminiSession() {
+   console.log('Initializing Gemini session');
+   
+   geminiWebSocket = new WebSocket(GEMINI_URL, []);
+   
+   geminiWebSocket.addEventListener('open', () => {
+     console.log('Gemini WebSocket connected');
+     
+     const setupMsg = {
+       "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentSetup",
+       model: GEMINI_MODEL,
+       generation_config: {
+         candidate_count: 1,
+         max_output_tokens: GEMINI_MAX_OUTPUT_TOKENS,
+         temperature: GEMINI_TEMPERATURE,
+         response_modalities: ["TEXT","AUDIO"],
+         speech_config: {
+           voice_config: {
+             prebuilt_voice_config: {
+               voice_name: GEMINI_VOICE_NAME
+             }
+           }
+         }
+       },
+       system_instruction: SYSTEM_PROMPT,
+       tools: []
+     };
+     
+     console.log('Sending Gemini setup message:', {
+       model: GEMINI_MODEL,
+       temperature: GEMINI_TEMPERATURE
+     });
+     
+     geminiWebSocket.send(JSON.stringify(setupMsg));
+   });
 
-    geminiWebSocket.addEventListener('message', evt => {
-      let msg;
-      try {
-        msg = JSON.parse(evt.data);
-      } catch (e) {
-        log(LOG_LEVELS.ERROR, 'Failed to parse Gemini message', {
-          error: e.message,
-          data: evt.data
-        });
-        return;
-      }
-      handleGeminiMessage(msg);
-    });
+   geminiWebSocket.addEventListener('message', evt => {
+     let msg;
+     try {
+       msg = JSON.parse(evt.data);
+     } catch (e) {
+       console.error('Failed to parse Gemini message:', {
+         error: e.message,
+         data: evt.data
+       });
+       return;
+     }
+     handleGeminiMessage(msg);
+   });
 
-    geminiWebSocket.addEventListener('close', () => {
-      log(LOG_LEVELS.INFO, 'Gemini WebSocket closed', {
-        sessionDuration: Date.now() - sessionStartTime
-      });
-      ably.close();
-    });
+   geminiWebSocket.addEventListener('close', () => {
+     console.log('Gemini WebSocket closed:', {
+       sessionDuration: Date.now() - sessionStartTime
+     });
+     ably.close();
+   });
 
-    geminiWebSocket.addEventListener('error', (error) => {
-      log(LOG_LEVELS.ERROR, 'Gemini WebSocket error', {
-        error: error.message
-      });
-    });
-  }
+   geminiWebSocket.addEventListener('error', (error) => {
+     console.error('Gemini WebSocket error:', {
+       error: error.message
+     });
+   });
+ }
 
-  function sendTextToGemini(text, endOfTurn = false) {
-    if (!geminiSessionOpen || clientPaused || serverPaused) {
-      log(LOG_LEVELS.DEBUG, 'Skipping text send - session state prevents sending', {
-        geminiSessionOpen,
-        clientPaused,
-        serverPaused
-      });
-      return;
-    }
+ function sendTextToGemini(text, endOfTurn = false) {
+   if (!geminiSessionOpen || clientPaused || serverPaused) {
+     console.log('Skipping text send - session state prevents sending:', {
+       geminiSessionOpen,
+       clientPaused,
+       serverPaused
+     });
+     return;
+   }
 
-    log(LOG_LEVELS.DEBUG, 'Sending text to Gemini', {
-      textLength: text.length,
-      endOfTurn
-    });
+   console.log('Sending text to Gemini:', {
+     textLength: text.length,
+     endOfTurn
+   });
 
-    const clientContent = {
-      "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentClientContent",
-      client_content: {
-        turns: [
-          {
-            parts: [{text}],
-            role: "user"
-          }
-        ],
-        turn_complete: endOfTurn
-      }
-    };
-    geminiWebSocket.send(JSON.stringify(clientContent));
-  }
+   const clientContent = {
+     "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentClientContent",
+     client_content: {
+       turns: [
+         {
+           parts: [{text}],
+           role: "user"
+         }
+       ],
+       turn_complete: endOfTurn
+     }
+   };
+   geminiWebSocket.send(JSON.stringify(clientContent));
+ }
 
-  function sendAudioToGemini(pcmuData) {
-    if (!geminiSessionOpen || clientPaused || serverPaused) {
-      log(LOG_LEVELS.DEBUG, 'Skipping audio send - session state prevents sending', {
-        geminiSessionOpen,
-        clientPaused,
-        serverPaused
-      });
-      return;
-    }
+ function sendAudioToGemini(pcmuData) {
+   if (!geminiSessionOpen || clientPaused || serverPaused) {
+     console.log('Skipping audio send - session state prevents sending:', {
+       geminiSessionOpen,
+       clientPaused,
+       serverPaused
+     });
+     return;
+   }
 
-    log(LOG_LEVELS.DEBUG, 'Processing audio for Gemini', {
-      inputLength: pcmuData.length
-    });
+   console.log('Processing audio for Gemini:', {
+     inputLength: pcmuData.length
+   });
 
-    const pcm24k = transcodePCMUtoPCM(pcmuData);
-    const base64Audio = uint8ArrayToBase64(pcm24k);
+   const pcm24k = transcodePCMUtoPCM(pcmuData);
+   const base64Audio = uint8ArrayToBase64(pcm24k);
 
-    const realtimeInputMsg = {
-      "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentRealtimeInput",
-      media_chunks: [base64Audio]
-    };
+   const realtimeInputMsg = {
+     "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentRealtimeInput",
+     media_chunks: [base64Audio]
+   };
 
-    log(LOG_LEVELS.DEBUG, 'Sending audio to Gemini', {
-      outputLength: base64Audio.length
-    });
+   console.log('Sending audio to Gemini:', {
+     outputLength: base64Audio.length
+   });
 
-    geminiWebSocket.send(JSON.stringify(realtimeInputMsg));
-    totalAudioProcessed += pcmuData.length;
-  }
+   geminiWebSocket.send(JSON.stringify(realtimeInputMsg));
+   totalAudioProcessed += pcmuData.length;
+ }
 
-  // Set up Ably channel subscriptions
-  await audioChannel.subscribe('audio', (msg) => {
-    if (!audiohookSessionOpen) {
-      log(LOG_LEVELS.WARN, 'Received audio before session open');
-      return;
-    }
+ // Set up Ably channel subscriptions
+ await audioChannel.subscribe('audio', (msg) => {
+   if (!audiohookSessionOpen) {
+     console.warn('Received audio before session open');
+     return;
+   }
 
-    const pcmuData = new Uint8Array(msg.data);
-    
-    if (!clientPaused && !serverPaused) {
-      const samplesInFrame = pcmuData.length;
-      samplesProcessed += samplesInFrame;
-      
-      log(LOG_LEVELS.DEBUG, 'Processing audio frame', {
-        frameSize: samplesInFrame,
-        totalProcessed: samplesProcessed
-      });
-      
-      sendAudioToGemini(pcmuData);
-    } else if (lastPauseTimestamp) {
-      samplesPaused += pcmuData.length;
-      
-      log(LOG_LEVELS.DEBUG, 'Skipping audio frame (paused)', {
-        frameSize: pcmuData.length,
-        totalPaused: samplesPaused
-      });
-    }
-  });
+   const pcmuData = new Uint8Array(msg.data);
+   
+   if (!clientPaused && !serverPaused) {
+     const samplesInFrame = pcmuData.length;
+     samplesProcessed += samplesInFrame;
+     
+     console.log('Processing audio frame:', {
+       frameSize: samplesInFrame,
+       totalProcessed: samplesProcessed
+     });
+     
+     sendAudioToGemini(pcmuData);
+   } else if (lastPauseTimestamp) {
+     samplesPaused += pcmuData.length;
+     
+     console.log('Skipping audio frame (paused):', {
+       frameSize: pcmuData.length,
+       totalPaused: samplesPaused
+     });
+   }
+ });
 
-  await controlChannel.subscribe('audiohook', async (msg) => {
-    const message = msg.data;
-    totalMessagesProcessed++;
+ await controlChannel.subscribe('audiohook', async (msg) => {
+   const message = msg.data;
+   totalMessagesProcessed++;
 
-    serverSeq = message.seq;
-    const { type, parameters = {} } = message;
+   serverSeq = message.seq;
+   const { type, parameters = {} } = message;
 
-    log(LOG_LEVELS.DEBUG, 'Received message from Genesys', {
-      type,
-      seq: message.seq
-    });
+   console.log('Received message from Genesys:', {
+     type,
+     seq: message.seq
+   });
 
-    switch (type) {
-      case 'open': {
-        const media = parameters.media || [];
-        if (!media.length) {
-          log(LOG_LEVELS.ERROR, 'No media formats offered');
-          sendErrorToGenesys(400, "No media formats offered");
-          return;
-        }
+   switch (type) {
+     case 'open': {
+       const media = parameters.media || [];
+       if (!media.length) {
+         console.error('No media formats offered');
+         sendErrorToGenesys(400, "No media formats offered");
+         return;
+       }
 
-        const pcmuFormat = media.find(m => 
-          m.type === 'audio' && 
-          m.format === 'PCMU' && 
-          m.rate === 8000
-        );
+       const pcmuFormat = media.find(m => 
+         m.type === 'audio' && 
+         m.format === 'PCMU' && 
+         m.rate === 8000);
 
         if (!pcmuFormat) {
-          log(LOG_LEVELS.ERROR, 'No supported media format found', {
+          console.error('No supported media format found:', {
             offeredFormats: media
           });
           sendErrorToGenesys(415, "No supported media format offered");
@@ -567,7 +549,7 @@ export default async function handleRequest(request) {
         samplesPaused = 0;
         lastPauseTimestamp = null;
         
-        log(LOG_LEVELS.INFO, 'Opening AudioHook session', {
+        console.log('Opening AudioHook session:', {
           sessionId,
           format: pcmuFormat
         });
@@ -590,7 +572,7 @@ export default async function handleRequest(request) {
 
       case 'update': {
         if (parameters.language) {
-          log(LOG_LEVELS.INFO, 'Language update received', {
+          console.log('Language update received:', {
             language: parameters.language
           });
           sendToGenesys("updated", {}, {clientseq: message.seq});
@@ -599,7 +581,7 @@ export default async function handleRequest(request) {
       }
 
       case 'dtmf': {
-        log(LOG_LEVELS.INFO, 'DTMF digit received', {
+        console.log('DTMF digit received:', {
           digit: parameters.digit
         });
         sendTextToGemini(`DTMF digit received: ${parameters.digit}`, true);
@@ -607,7 +589,7 @@ export default async function handleRequest(request) {
       }
 
       case 'event': {
-        log(LOG_LEVELS.INFO, 'Event received from Genesys', {
+        console.log('Event received from Genesys:', {
           parameters
         });
         break;
@@ -624,7 +606,7 @@ export default async function handleRequest(request) {
           lastRtt = Date.now() - lastPingTimestamp;
           rttHistory.push(lastRtt);
           
-          log(LOG_LEVELS.DEBUG, 'RTT measured', {
+          console.log('RTT measured:', {
             rtt: lastRtt
           });
           
@@ -637,7 +619,7 @@ export default async function handleRequest(request) {
         serverPaused = true;
         lastPauseTimestamp = Date.now();
         
-        log(LOG_LEVELS.INFO, 'Server requested pause');
+        console.log('Server requested pause');
         
         sendToGenesys("paused", {}, {clientseq: message.seq});
         break;
@@ -646,7 +628,7 @@ export default async function handleRequest(request) {
       case 'resume': {
         serverPaused = false;
         
-        log(LOG_LEVELS.INFO, 'Server requested resume', {
+        console.log('Server requested resume:', {
           samplesProcessed,
           samplesPaused
         });
@@ -666,7 +648,7 @@ export default async function handleRequest(request) {
       }
 
       case 'close': {
-        log(LOG_LEVELS.INFO, 'Close request received');
+        console.log('Close request received');
         
         handleCloseTransaction();
         logSessionMetrics();
@@ -685,7 +667,7 @@ export default async function handleRequest(request) {
       }
 
       case 'disconnect': {
-        log(LOG_LEVELS.INFO, 'Disconnect request received');
+        console.log('Disconnect request received');
         
         logSessionMetrics();
         
@@ -704,13 +686,13 @@ export default async function handleRequest(request) {
       case 'paused':
       case 'resumed':
       case 'updated':
-        log(LOG_LEVELS.WARN, 'Received unexpected message type', {
+        console.warn('Received unexpected message type:', {
           type
         });
         break;
 
       default:
-        log(LOG_LEVELS.ERROR, 'Unknown message type received', {
+        console.error('Unknown message type received:', {
           type
         });
         sendErrorToGenesys(405, `Unknown message type: ${type}`);
@@ -719,12 +701,12 @@ export default async function handleRequest(request) {
   });
 
   function handleCloseTransaction() {
-    log(LOG_LEVELS.INFO, 'Starting close transaction');
+    console.log('Starting close transaction');
     
     closeTransactionComplete = false;
     closeTransactionTimer = setTimeout(() => {
       if (!closeTransactionComplete) {
-        log(LOG_LEVELS.ERROR, 'Close transaction timeout');
+        console.error('Close transaction timeout');
         sendErrorToGenesys(408, "Close transaction timeout");
         ably.close();
       }
@@ -737,7 +719,7 @@ export default async function handleRequest(request) {
       rttHistory.reduce((a, b) => a + b, 0) / rttHistory.length : 
       null;
 
-    log(LOG_LEVELS.INFO, 'Session metrics', {
+    console.log('Session metrics:', {
       duration: sessionDuration,
       totalAudioProcessed,
       totalMessagesProcessed,
@@ -764,7 +746,7 @@ export default async function handleRequest(request) {
   });
 
   ably.connection.on('closed', () => {
-    log(LOG_LEVELS.INFO, 'Ably connection closed');
+    console.log('Ably connection closed');
     
     if (closeTransactionTimer) {
       clearTimeout(closeTransactionTimer);
@@ -784,4 +766,4 @@ export default async function handleRequest(request) {
       'Content-Type': 'application/json'
     }
   });
-} 
+}

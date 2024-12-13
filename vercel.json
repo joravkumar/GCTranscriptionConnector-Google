@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "functions": {
+    "api/middleware.js": {
+      "memory": 1024,
+      "maxDuration": 300
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/middleware",
+      "continue": true,
+      "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "X-API-KEY, Audiohook-Organization-Id, Audiohook-Correlation-Id, Audiohook-Session-Id, Content-Type",
+        "Access-Control-Max-Age": "86400"
+      }
+    }
+  ]
+}

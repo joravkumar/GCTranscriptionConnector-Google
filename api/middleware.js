@@ -22,9 +22,16 @@ export const config = {
  * but it is fully functional. In a real production environment, you would use proper DSP libraries for audio conversion.
  */
 
-const GEMINI_MODEL = "models/gemini-2.0-flash-exp";
+import { SYSTEM_PROMPT } from './systemPrompt';
+
 const GEMINI_URL = "wss://generativelanguage.googleapis.com/v1alpha/models:bidigeneratecontent";
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || 'YOUR_API_KEY';
+
+// Environment variables with defaults
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp";
+const GEMINI_TEMPERATURE = parseFloat(process.env.GEMINI_TEMPERATURE || "0.2");
+const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || "1024");
+const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || "Kore";
 
 // PCMU <-> PCM conversion tables/functions (G.711 μ-law)
 const MULAW_MAX = 0x1FFF;
@@ -286,18 +293,19 @@ export default async function handleRequest(request) {
         "@type": "type.googleapis.com/google.ai.generativelanguage.v1alpha.BidiGenerateContentSetup",
         model: GEMINI_MODEL,
         generation_config: {
-          max_output_tokens: 1024,
-          temperature: 0.2,
+          candidate_count: 1,
+          max_output_tokens: GEMINI_MAX_OUTPUT_TOKENS,
+          temperature: GEMINI_TEMPERATURE,
           response_modalities: ["TEXT","AUDIO"],
           speech_config: {
             voice_config: {
               prebuilt_voice_config: {
-                voice_name: "Kore"
+                voice_name: GEMINI_VOICE_NAME
               }
             }
           }
         },
-        system_instruction: "You are a helpful voice assistant. Respond concisely.",
+        system_instruction: SYSTEM_PROMPT,
         tools: []
       };
       geminiWebSocket.send(JSON.stringify(setupMsg));

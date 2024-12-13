@@ -46,19 +46,12 @@ const LOG_LEVELS = {
 };
 
 function log(level, message, data = null) {
-  const timestamp = new Date().toISOString();
-  const logEntry = {
-    timestamp,
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
     level,
     message,
     data
-  };
-  
-  if (level === LOG_LEVELS.ERROR) {
-    console.error(JSON.stringify(logEntry));
-  } else {
-    console.log(JSON.stringify(logEntry));
-  }
+  }));
 }
 
 const SYSTEM_PROMPT = `You are a professional and friendly voice assistant. Your responses should be:
@@ -224,6 +217,7 @@ export default async function handleRequest(request) {
   }
 
   // Initialize Ably
+  console.log('Initializing Ably connection');
   const ably = new Ably.Realtime({ key: process.env.ABLY_API_KEY });
   
   // Create unique channel names for this session
@@ -753,11 +747,13 @@ export default async function handleRequest(request) {
     });
   }
 
+  ably.connection.on('connected', () => {
+    console.log('Ably connected successfully');
+  });
+
   // Set up error handling for Ably
   ably.connection.on('failed', (error) => {
-    log(LOG_LEVELS.ERROR, 'Ably connection failed', {
-      error: error.message
-    });
+    console.error('Ably connection failed:', error);
     
     if (closeTransactionTimer) {
       clearTimeout(closeTransactionTimer);

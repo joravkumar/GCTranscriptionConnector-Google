@@ -53,7 +53,12 @@ function log(level, message, data = null) {
     message,
     data
   };
-  console.log(JSON.stringify(logEntry));
+  
+  if (level === LOG_LEVELS.ERROR) {
+    console.error(JSON.stringify(logEntry));
+  } else {
+    console.log(JSON.stringify(logEntry));
+  }
 }
 
 const SYSTEM_PROMPT = `You are a professional and friendly voice assistant. Your responses should be:

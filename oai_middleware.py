@@ -1,7 +1,3 @@
-"""
-Genesys Audio Connector <--> OpenAI Realtime API bridging server
-"""
-
 import asyncio
 import json
 import uuid
@@ -13,11 +9,12 @@ import os
 import ssl
 import http
 import re
+import websockets
+
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
-
-import websockets
+from collections import deque
 
 # Load environment variables from .env file
 env_path = Path('.') / '.env'
@@ -25,19 +22,18 @@ if not env_path.exists():
     raise FileNotFoundError("Please create a .env file with OPENAI_API_KEY and OPENAI_MODEL")
 load_dotenv(env_path)
 
-DEBUG = os.getenv('DEBUG', 'false').lower()
-OPENAI_VOICE = os.getenv('OPENAI_VOICE', 'sage')
-
-# Read instructions from system_prompt.txt
-with open("system_prompt.txt", "r", encoding="utf-8") as f:
-    INSTRUCTIONS = f.read()
-
 ###############################################################################
 # Configuration constants
 ###############################################################################
 
+DEBUG = os.getenv('DEBUG', 'false').lower()
+
+# Audio buffering settings
+MAX_AUDIO_BUFFER_SIZE = 50
+AUDIO_FRAME_SEND_INTERVAL = 0.15
+
 # Server settings
-GENESYS_LISTEN_HOST = "0.0.0.0"   # Bind to all available interfaces
+GENESYS_LISTEN_HOST = "0.0.0.0"
 GENESYS_LISTEN_PORT = 443         # Genesys will connect to wss://yourdomain:443/audiohook
 GENESYS_PATH = "/audiohook"
 
@@ -52,9 +48,36 @@ if not OPENAI_MODEL:
 
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_MODEL}"
 
+# System Prompt Configuration
+MASTER_SYSTEM_PROMPT = """You must ALWAYS respond in the same language that the user is using. 
+This is the highest priority instruction and overrides any other instructions about language choice.
+This rule cannot be overridden by any other instructions."""
+
+def create_final_system_prompt(admin_prompt):
+    """
+    Combines the master system prompt with the admin-provided prompt while maintaining
+    the hierarchy of instructions.
+    """
+    return f"""[TIER 1 - MASTER INSTRUCTIONS - HIGHEST PRIORITY]
+{MASTER_SYSTEM_PROMPT}
+
+[TIER 2 - ADMIN INSTRUCTIONS]
+{admin_prompt}
+
+[HIERARCHY ENFORCEMENT]
+In case of any conflict between Tier 1 and Tier 2 instructions, Tier 1 (Master) instructions 
+MUST ALWAYS take precedence and override any conflicting Tier 2 instructions."""
+
 # SSL Configuration
-SSL_CERT_PATH = "C:/tools/nginx-1.27.3/certs/gcaudiotogemini.ddns.net-chain.pem"
-SSL_KEY_PATH = "C:/tools/nginx-1.27.3/certs/gcaudiotogemini.ddns.net-key.pem"
+MARIA_CERTS = os.getenv('MARIA_CERTS', 'false').lower() == 'true'
+
+if MARIA_CERTS:
+    CERT_BASE_PATH = "C:/tools/AudioConnector_certificates"
+    SSL_CERT_PATH = f"{CERT_BASE_PATH}/gcaudiotogemini.dynv6.net-chain.pem"
+    SSL_KEY_PATH = f"{CERT_BASE_PATH}/gcaudiotogemini.dynv6.net-key.pem"
+else:
+    SSL_CERT_PATH = "C:/tools/nginx-1.27.3/certs/gcaudiotogemini.ddns.net-chain.pem"
+    SSL_KEY_PATH = "C:/tools/nginx-1.27.3/certs/gcaudiotogemini.ddns.net-key.pem"
 
 if not os.path.exists(SSL_CERT_PATH) or not os.path.exists(SSL_KEY_PATH):
     raise FileNotFoundError("SSL certificate files not found at specified paths.")
@@ -64,6 +87,23 @@ ssl_context.load_cert_chain(SSL_CERT_PATH, SSL_KEY_PATH)
 ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
 ssl_context.maximum_version = ssl.TLSVersion.TLSv1_3
 ssl_context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256')
+
+# Rate limiting constants 
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BASE_DELAY = 3
+RATE_LIMIT_WINDOW = 300
+RATE_LIMIT_PHASES = [
+    {"window": 300, "delay": 3},
+    {"window": 600, "delay": 9},
+    {"window": float('inf'), "delay": 27}
+]
+
+# Genesys rate limiting constants (to respect Audio Hook limits)
+GENESYS_MSG_RATE_LIMIT = 5
+GENESYS_BINARY_RATE_LIMIT = 5
+GENESYS_MSG_BURST_LIMIT = 25
+GENESYS_BINARY_BURST_LIMIT = 25
+GENESYS_RATE_WINDOW = 1.0 
 
 # Logging
 LOG_FILE = "logging.txt"
@@ -84,26 +124,10 @@ logging.basicConfig(
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 websockets_logger = logging.getLogger('websockets')
-
-# Add a filter to redact sensitive info if DEBUG=true
-class SensitiveInfoFilter(logging.Filter):
-    def filter(self, record):
-        if DEBUG == 'true':
-            msg = record.getMessage()
-            # Redact Authorization header value
-            if 'Authorization:' in msg:
-                msg = re.sub(r"(Authorization:\s*Bearer\s+)\S+", r"\1********", msg)
-            # Redact Sec-WebSocket-Key header value
-            if 'Sec-WebSocket-Key:' in msg:
-                msg = re.sub(r"(Sec-WebSocket-Key:\s*)\S+", r"\1********", msg)
-            record.msg = msg
-        return True
-
-websockets_logger.addFilter(SensitiveInfoFilter())
+websockets_logger.setLevel(logging.INFO) # We don't want to never log more than info here, to prevent sensitive data to be logged
 
 if DEBUG != 'true':
     logger.setLevel(logging.INFO)
-    websockets_logger.setLevel(logging.INFO)
 
 ###############################################################################
 # Utility Functions
@@ -137,8 +161,7 @@ async def handle_http_request(path: str, request_headers):
 
     logger.info("[HTTP] Received headers:")
     for header, value in request_headers.items():
-        masked_value = '*' * 8 if header.lower() in ['x-api-key', 'authorization'] else value
-        logger.info(f"[HTTP]   {header}: {masked_value}")
+        logger.info(f"[HTTP]   {header}: {value}")
 
     header_keys = {k.lower(): v for k, v in request_headers.items()}
     missing_headers = [h for h in required_headers if h not in header_keys]
@@ -163,11 +186,45 @@ async def handle_http_request(path: str, request_headers):
     return None
 
 ###############################################################################
-# OpenAI Realtime Client
+# Rate Limiter
 ###############################################################################
 
+class RateLimiter:
+    def __init__(self, rate_limit, burst_limit, window_seconds=1.0):
+        self.rate_limit = rate_limit
+        self.burst_limit = burst_limit
+        self.window = window_seconds
+        self.timestamps = []
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            window_start = now - self.window
+            self.timestamps = [ts for ts in self.timestamps if ts > window_start]
+            
+            if len(self.timestamps) >= self.burst_limit:
+                return False
+                
+            if len(self.timestamps) >= self.rate_limit:
+                oldest = self.timestamps[0]
+                if now - oldest < self.window:
+                    return False
+                    
+            self.timestamps.append(now)
+            return True
+
+    def get_current_rate(self):
+        now = time.time()
+        window_start = now - self.window
+        recent = [ts for ts in self.timestamps if ts > window_start]
+        return len(recent) / self.window if recent else 0
+
+###############################################################################
+# OpenAI Realtime Client
+###############################################################################
 class OpenAIRealtimeClient:
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, on_speech_started_callback=None):
         self.ws = None
         self.running = False
         self.read_task = None
@@ -175,93 +232,212 @@ class OpenAIRealtimeClient:
         self.session_id = session_id
         self.logger = logger.getChild(f"OpenAIClient_{session_id}")
         self.start_time = time.time()
+        self.voice = None
+        self.admin_instructions = None
+        self.final_instructions = None
+        self.on_speech_started_callback = on_speech_started_callback
+        self.retry_count = 0
+        self.last_retry_time = 0
+        self.rate_limit_delays = {} 
 
-    async def connect(self, instructions=INSTRUCTIONS, voice=OPENAI_VOICE):
+    async def handle_rate_limit(self):
+        if self.retry_count >= RATE_LIMIT_MAX_RETRIES:
+            self.logger.error(
+                f"[Rate Limit] Max retry attempts ({RATE_LIMIT_MAX_RETRIES}) reached. "
+                f"Total duration: {time.time() - self.start_time:.2f}s, "
+                f"Last retry at: {self.last_retry_time:.2f}s"
+            )
+            await self.disconnect_session(reason="error", info="Rate limit max retries exceeded")
+            return False
+                
+        self.retry_count += 1
+        session_duration = time.time() - self.start_time
+        self.logger.info(f"[Rate Limit] Current session duration: {session_duration:.2f}s")
+        
+        delay = None
+        for phase in RATE_LIMIT_PHASES:
+            if session_duration <= phase["window"]:
+                delay = phase["delay"]
+                self.logger.info(
+                    f"[Rate Limit] Selected delay {delay}s based on window {phase['window']}s"
+                )
+                break
+                
+        if delay is None:
+            delay = RATE_LIMIT_PHASES[-1]["delay"]
+            self.logger.info(
+                f"[Rate Limit] Using maximum delay {delay}s (beyond all windows)"
+            )
+        
+        self.logger.warning(
+            f"[Rate Limit] Hit rate limit, attempt {self.retry_count}/{RATE_LIMIT_MAX_RETRIES}. "
+            f"Backing off for {delay}s. Session duration: {session_duration:.2f}s. "
+            f"Time since last retry: {time.time() - self.last_retry_time:.2f}s"
+        )
+        
+        self.running = False
+        self.logger.info("[Rate Limit] Paused operations, starting backoff sleep")
+        await asyncio.sleep(delay)
+        self.running = True
+        self.logger.info("[Rate Limit] Resumed operations after backoff")
+        
+        time_since_last = time.time() - self.last_retry_time
+        if time_since_last > RATE_LIMIT_WINDOW:
+            self.retry_count = 0
+            self.logger.info(
+                f"[Rate Limit] Reset retry count after {time_since_last:.2f}s "
+                f"(window: {RATE_LIMIT_WINDOW}s)"
+            )
+        
+        self.last_retry_time = time.time()
+        return True
+
+    async def connect(self, instructions=None, voice=None):
         from websockets.asyncio.client import connect as ws_connect
+        
+        # Always trust the instructions passed in; no fallback here.
+        self.admin_instructions = instructions
+        self.final_instructions = create_final_system_prompt(self.admin_instructions)
+        
+        self.voice = voice if voice and voice.strip() else "echo"
         
         ws_headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1"
         }
 
-        try:
-            self.logger.info(f"Connecting to OpenAI Realtime API WebSocket using model: {OPENAI_MODEL}...")
-            self.logger.debug(f"WebSocket URL: {OPENAI_REALTIME_URL}")
-            connect_start = time.time()
-            
-            self.ws = await asyncio.wait_for(
-                ws_connect(
-                    OPENAI_REALTIME_URL,
-                    additional_headers=ws_headers,
-                    max_size=2**23,
-                    compression=None,
-                    max_queue=32
-                ),
-                timeout=10.0
-            )
+        while True:  # Loop to handle retries
+            try:
+                self.logger.info(f"Connecting to OpenAI Realtime API WebSocket using model: {OPENAI_MODEL}...")
+                connect_start = time.time()
+                
+                self.ws = await asyncio.wait_for(
+                    ws_connect(
+                        OPENAI_REALTIME_URL,
+                        additional_headers=ws_headers,
+                        max_size=2**23,
+                        compression=None,
+                        max_queue=32
+                    ),
+                    timeout=10.0
+                )
 
-            connect_time = time.time() - connect_start
-            self.logger.info(f"OpenAI WebSocket connection established in {connect_time:.2f}s")
-            self.running = True
+                connect_time = time.time() - connect_start
+                self.logger.info(f"OpenAI WebSocket connection established in {connect_time:.2f}s")
+                self.running = True
 
-            msg = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
-            server_event = json.loads(msg)
-            self.logger.debug(f"Received from OpenAI on connect:\n{format_json(server_event)}")
-            if server_event.get("type") != "session.created":
-                self.logger.error("Did not receive session.created event.")
-                await self.close()
-                raise RuntimeError("OpenAI session not created")
+                msg = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
+                server_event = json.loads(msg)
+                
+                if server_event.get("type") == "error":
+                    error_code = server_event.get("code")
+                    if error_code == 429:
+                        self.logger.warning(
+                            f"[Rate Limit] Received 429 during connection. "
+                            f"Message: {server_event.get('message', 'No message')}. "
+                            f"Session: {self.session_id}"
+                        )
+                        if await self.handle_rate_limit():
+                            await self.close()
+                            continue
+                        else:
+                            await self.close()
+                            raise RuntimeError("[Rate Limit] Max rate limit retries exceeded during connection")
+                    else:
+                        self.logger.error(f"Received error from OpenAI: {server_event}")
+                        await self.close()
+                        raise RuntimeError(f"OpenAI error: {server_event.get('message', 'Unknown error')}")
 
-            session_update = {
-                "type": "session.update",
-                "session": {
-                    "modalities": ["audio", "text"],
-                    "instructions": instructions,
-                    "voice": voice,
-                    "input_audio_format": "g711_ulaw",
-                    "output_audio_format": "g711_ulaw",
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
-                        "create_response": True
+                if server_event.get("type") != "session.created":
+                    self.logger.error("Did not receive session.created event.")
+                    await self.close()
+                    raise RuntimeError("OpenAI session not created")
+
+                session_update = {
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["audio", "text"],
+                        "instructions": self.final_instructions,
+                        "voice": self.voice,
+                        "input_audio_format": "g711_ulaw",
+                        "output_audio_format": "g711_ulaw",
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                            "create_response": True
+                        }
                     }
                 }
-            }
-            await self._safe_send(json.dumps(session_update))
 
-            updated_ok = False
-            while True:
-                msg = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
-                ev = json.loads(msg)
-                self.logger.debug(f"Received after session.update:\n{format_json(ev)}")
-                if ev.get("type") == "session.updated":
-                    updated_ok = True
-                    break
-            if not updated_ok:
-                self.logger.error("Session update not confirmed.")
+                await self._safe_send(json.dumps(session_update))
+
+                updated_ok = False
+                while True:
+                    msg = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
+                    ev = json.loads(msg)
+                    self.logger.debug(f"Received after session.update:\n{format_json(ev)}")
+                    
+                    if ev.get("type") == "error" and ev.get("code") == 429:
+                        if await self.handle_rate_limit():
+                            await self.close()
+                            break
+                        else:
+                            await self.close()
+                            raise RuntimeError("Max rate limit retries exceeded during session update")
+                    
+                    if ev.get("type") == "session.updated":
+                        updated_ok = True
+                        break
+
+                if not updated_ok:
+                    if self.retry_count < RATE_LIMIT_MAX_RETRIES:
+                        await self.close()
+                        continue
+                    else:
+                        self.logger.error("Session update not confirmed.")
+                        await self.close()
+                        raise RuntimeError("OpenAI session update not confirmed")
+
+                self.retry_count = 0
+                return
+
+            except (asyncio.TimeoutError, websockets.exceptions.WebSocketException, TypeError) as e:
+                self.logger.error(f"Error establishing OpenAI connection: {e}")
+                self.logger.error(f"Model: {OPENAI_MODEL}")
+                self.logger.error(f"URL: {OPENAI_REALTIME_URL}")
+                
+                if isinstance(e, websockets.exceptions.WebSocketException):
+                    self.logger.error(f"WebSocket specific error details: {str(e)}")
+                    if "429" in str(e) and await self.handle_rate_limit():
+                        await self.close()
+                        continue
+                
                 await self.close()
-                raise RuntimeError("OpenAI session update not confirmed")
-
-        except (asyncio.TimeoutError, websockets.exceptions.WebSocketException, TypeError) as e:
-            self.logger.error(f"Error establishing OpenAI connection: {e}")
-            self.logger.error(f"Model: {OPENAI_MODEL}")
-            self.logger.error(f"URL: {OPENAI_REALTIME_URL}")
-            if isinstance(e, websockets.exceptions.WebSocketException):
-                self.logger.error(f"WebSocket specific error details: {str(e)}")
-            await self.close()
-            raise RuntimeError(f"Failed to connect to OpenAI: {str(e)}")
+                raise RuntimeError(f"Failed to connect to OpenAI: {str(e)}")
 
     async def _safe_send(self, message: str):
         async with self._lock:
             if self.ws and self.running:
                 try:
-                    msg_dict = json.loads(message)
-                    self.logger.debug(f"Sending to OpenAI:\n{format_json(msg_dict)}")
-                except json.JSONDecodeError:
-                    self.logger.debug(f"Sending raw to OpenAI: {message[:200]}...")
-                await self.ws.send(message)
+                    if DEBUG == 'true':
+                        try:
+                            msg_dict = json.loads(message)
+                            self.logger.debug(f"Sending to OpenAI: type={msg_dict.get('type', 'unknown')}")
+                        except json.JSONDecodeError:
+                            self.logger.debug("Sending raw message to OpenAI")
+                    
+                    try:
+                        await self.ws.send(message)
+                    except websockets.exceptions.WebSocketException as e:
+                        if "429" in str(e) and await self.handle_rate_limit():
+                            await self.ws.send(message)
+                        else:
+                            raise
+                except Exception as e:
+                    self.logger.error(f"Error in _safe_send: {e}")
+                    raise
 
     async def send_audio(self, pcmu_8k: bytes):
         if not self.running or self.ws is None:
@@ -284,15 +460,22 @@ class OpenAIRealtimeClient:
                     raw = await self.ws.recv()
                     try:
                         msg_dict = json.loads(raw)
-                        self.logger.debug(f"Received from OpenAI:\n{format_json(msg_dict)}")
                         ev_type = msg_dict.get("type", "")
+                        
+                        if DEBUG == 'true':
+                            self.logger.debug(f"Received from OpenAI: type={ev_type}")
+                            
                         if ev_type == "response.audio.delta":
                             delta_b64 = msg_dict.get("delta", "")
                             if delta_b64:
                                 pcmu_8k = base64.b64decode(delta_b64)
                                 on_audio_callback(pcmu_8k)
+                        if ev_type == "input_audio_buffer.speech_started":
+                            if self.on_speech_started_callback:
+                                await self.on_speech_started_callback()
                     except json.JSONDecodeError:
-                        self.logger.debug(f"Received raw from OpenAI: {raw[:200]}...")
+                        if DEBUG == 'true':
+                            self.logger.debug("Received raw message from OpenAI (non-JSON)")
             except websockets.exceptions.ConnectionClosed:
                 self.logger.info("OpenAI websocket closed.")
                 self.running = False
@@ -316,6 +499,9 @@ class OpenAIRealtimeClient:
             self.read_task.cancel()
             self.read_task = None
 
+    async def disconnect_session(self, reason="completed", info=""):
+        await self.close()
+
 ###############################################################################
 # Genesys AudioHook protocol server
 ###############################################################################
@@ -326,22 +512,212 @@ class AudioHookServer:
         self.ws = websocket
         self.client_seq = 0
         self.server_seq = 0
-        self.openai_client = OpenAIRealtimeClient(self.session_id)
+        self.openai_client = None
         self.running = True
         self.negotiated_media = None
         self.start_time = time.time()
         self.logger = logger.getChild(f"AudioHookServer_{self.session_id}")
         self.audio_frames_sent = 0
         self.audio_frames_received = 0
+        self.rate_limit_state = {
+            "retry_count": 0,
+            "last_retry_time": 0,
+            "in_backoff": False
+        }
+        
+        self.message_limiter = RateLimiter(GENESYS_MSG_RATE_LIMIT, GENESYS_MSG_BURST_LIMIT)
+        self.binary_limiter = RateLimiter(GENESYS_BINARY_RATE_LIMIT, GENESYS_BINARY_BURST_LIMIT)
+        
+        self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
+        self.audio_process_task = None
+        self.last_frame_time = 0
 
         self.logger.info(f"New session started: {self.session_id}")
+
+
+    async def start_audio_processing(self):
+        self.audio_process_task = asyncio.create_task(self._process_audio_buffer())
+        
+    async def stop_audio_processing(self):
+        if self.audio_process_task:
+            self.audio_process_task.cancel()
+            try:
+                await self.audio_process_task
+            except asyncio.CancelledError:
+                pass
+            self.audio_process_task = None
+
+    async def _process_audio_buffer(self):
+        try:
+            while self.running:
+                if self.audio_buffer:
+                    now = time.time()
+                    if now - self.last_frame_time >= AUDIO_FRAME_SEND_INTERVAL:
+                        if await self.binary_limiter.acquire():
+                            frame = self.audio_buffer.popleft()
+                            try:
+                                await self.ws.send(frame)
+                                self.audio_frames_sent += 1
+                                self.last_frame_time = now
+                                self.logger.debug(
+                                    f"Sent audio frame from buffer: {len(frame)} bytes "
+                                    f"(frame #{self.audio_frames_sent}, buffer size: {len(self.audio_buffer)})"
+                                )
+                            except websockets.ConnectionClosed:
+                                self.logger.warning("Genesys WebSocket closed while sending audio frame.")
+                                self.running = False
+                                break
+                        else:
+                            await asyncio.sleep(AUDIO_FRAME_SEND_INTERVAL)
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            self.logger.info("Audio processing task cancelled")
+        except Exception as e:
+            self.logger.error(f"Error in audio processing task: {e}", exc_info=True)       
+
+    def parse_iso8601_duration(self, duration_str: str) -> float:
+        match = re.match(r'P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?', duration_str)
+        if not match:
+            raise ValueError(f"Invalid ISO 8601 duration format: {duration_str}")
+            
+        days, hours, minutes, seconds = match.groups()
+        total_seconds = 0
+        if days:
+            total_seconds += int(days) * 86400
+        if hours:
+            total_seconds += int(hours) * 3600
+        if minutes:
+            total_seconds += int(minutes) * 60
+        if seconds:
+            total_seconds += float(seconds)
+        return total_seconds
+
+    async def handle_error(self, msg: dict):
+        error_code = msg["parameters"].get("code")
+        error_params = msg["parameters"]
+        
+        if error_code == 429:
+            retry_after = None
+            
+            if "retryAfter" in error_params:
+                retry_after_duration = error_params["retryAfter"]
+                try:
+                    retry_after = self.parse_iso8601_duration(retry_after_duration)
+                    self.logger.info(
+                        f"[Rate Limit] Using Genesys-provided retryAfter duration: {retry_after}s "
+                        f"(parsed from {retry_after_duration})"
+                    )
+                except ValueError as e:
+                    self.logger.warning(
+                        f"[Rate Limit] Failed to parse Genesys retryAfter format: {retry_after_duration}. "
+                        f"Error: {str(e)}"
+                    )
+            
+            if retry_after is None and hasattr(self.ws, 'response_headers'):
+                http_retry_after = (
+                    self.ws.response_headers.get('Retry-After') or 
+                    self.ws.response_headers.get('retry-after')
+                )
+                if http_retry_after:
+                    try:
+                        retry_after = float(http_retry_after)
+                        self.logger.info(
+                            f"[Rate Limit] Using HTTP header Retry-After duration: {retry_after}s"
+                        )
+                    except ValueError:
+                        try:
+                            retry_after = self.parse_iso8601_duration(http_retry_after)
+                            self.logger.info(
+                                f"[Rate Limit] Using HTTP header Retry-After duration: {retry_after}s "
+                                f"(parsed from ISO8601)"
+                            )
+                        except ValueError:
+                            self.logger.warning(
+                                f"[Rate Limit] Failed to parse HTTP Retry-After format: {http_retry_after}"
+                            )
+
+            self.logger.warning(
+                f"[Rate Limit] Received 429 error. "
+                f"Session: {self.session_id}, "
+                f"Current duration: {time.time() - self.start_time:.2f}s, "
+                f"Retry count: {self.rate_limit_state['retry_count']}, "
+                f"RetryAfter: {retry_after}s"
+            )
+
+            self.rate_limit_state["in_backoff"] = True
+            self.rate_limit_state["retry_count"] += 1
+
+            if self.rate_limit_state["retry_count"] > RATE_LIMIT_MAX_RETRIES:
+                self.logger.error(
+                    f"[Rate Limit] Max retries ({RATE_LIMIT_MAX_RETRIES}) exceeded. "
+                    f"Session: {self.session_id}, "
+                    f"Total retries: {self.rate_limit_state['retry_count']}, "
+                    f"Duration: {time.time() - self.start_time:.2f}s"
+                )
+                await self.disconnect_session(reason="error", info="Rate limit max retries exceeded")
+                return False
+
+            if self.openai_client:
+                self.openai_client.running = False
+            self.running = False
+
+            session_duration = time.time() - self.start_time
+
+            if retry_after is not None:
+                used_delay = retry_after
+                self.logger.info(
+                    f"[Rate Limit] Using provided retry delay: {used_delay}s. "
+                    f"Session: {self.session_id}"
+                )
+            else:
+                delay = None
+                for phase in RATE_LIMIT_PHASES:
+                    if session_duration <= phase["window"]:
+                        delay = phase["delay"]
+                        break
+                if delay is None:
+                    delay = RATE_LIMIT_PHASES[-1]["delay"]
+                used_delay = delay
+                self.logger.info(
+                    f"[Rate Limit] Using default exponential backoff delay: {used_delay}s. "
+                    f"Session: {self.session_id}"
+                )
+
+            self.logger.warning(
+                f"[Rate Limit] Rate limited, attempt {self.rate_limit_state['retry_count']}/{RATE_LIMIT_MAX_RETRIES}. "
+                f"Backing off for {used_delay}s. "
+                f"Session: {self.session_id}, "
+                f"Duration: {session_duration:.2f}s"
+            )
+
+            await asyncio.sleep(used_delay)
+
+            self.running = True
+            if self.openai_client:
+                self.openai_client.running = True
+
+            self.rate_limit_state["in_backoff"] = False
+            self.logger.info(
+                f"[Rate Limit] Backoff complete, resuming operations. "
+                f"Session: {self.session_id}"
+            )
+
+            return True
+        return False
 
     async def handle_message(self, msg: dict):
         msg_type = msg.get("type")
         seq = msg.get("seq", 0)
         self.client_seq = seq
 
-        self.logger.debug(f"Received message from Genesys:\n{format_json(msg)}")
+        if self.rate_limit_state.get("in_backoff") and msg_type != "error":
+            self.logger.debug(f"Skipping message type {msg_type} during rate limit backoff")
+            return
+
+        if msg_type == "error":
+            handled = await self.handle_error(msg)
+            if handled:
+                return
 
         if msg_type == "open":
             await self.handle_open(msg)
@@ -349,8 +725,6 @@ class AudioHookServer:
             await self.handle_ping(msg)
         elif msg_type == "close":
             await self.handle_close(msg)
-        elif msg_type == "error":
-            self.logger.warning(f"Received 'error' from Genesys:\n{format_json(msg)}")
         elif msg_type in ["update", "resume", "pause"]:
             self.logger.debug(f"Ignoring message of type {msg_type}")
         else:
@@ -420,9 +794,18 @@ class AudioHookServer:
         await self._send_json(opened_msg)
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
+        input_vars = msg["parameters"].get("inputVariables", {})
+        voice = input_vars.get("OPENAI_VOICE", "sage")
+        instructions = input_vars.get("OPENAI_SYSTEM_PROMPT", "You are a helpful assistant.")
+
+        self.logger.info(f"Using voice: {voice}")
+        self.logger.debug(f"Using instructions: {instructions}")
+
         # Connect to OpenAI
         try:
-            await self.openai_client.connect(voice=OPENAI_VOICE, instructions=INSTRUCTIONS)
+            self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
+            # Pass the instructions directly (no fallback)
+            await self.openai_client.connect(instructions=instructions, voice=voice)
         except Exception as e:
             self.logger.error(f"OpenAI connection failed: {e}")
             await self.disconnect_session(reason="error", info=str(e))
@@ -431,7 +814,27 @@ class AudioHookServer:
         def on_audio_callback(pcmu_8k: bytes):
             asyncio.create_task(self.handle_openai_audio(pcmu_8k))
 
+        await self.start_audio_processing()
         await self.openai_client.start_receiving(on_audio_callback)
+
+    async def handle_speech_started(self):
+        event_msg = {
+            "version": "2",
+            "type": "event",
+            "seq": self.server_seq + 1,
+            "clientseq": self.client_seq,
+            "id": self.session_id,
+            "parameters": {
+                "entities": [
+                    {
+                        "type": "barge_in",
+                        "data": {}
+                    }
+                ]
+            }
+        }
+        self.server_seq += 1
+        await self._send_json(event_msg)
 
     async def handle_openai_audio(self, pcmu_8k: bytes):
         if not self.running:
@@ -441,13 +844,17 @@ class AudioHookServer:
         await self.send_binary_to_genesys(pcmu_8k)
 
     async def send_binary_to_genesys(self, data: bytes):
-        try:
-            await self.ws.send(data)
-            self.audio_frames_sent += 1
-            self.logger.debug(f"Sent audio frame to Genesys: {len(data)} bytes (frame #{self.audio_frames_sent})")
-        except websockets.ConnectionClosed:
-            self.logger.warning("Genesys WebSocket closed while sending audio frame.")
-            self.running = False
+        if len(self.audio_buffer) < MAX_AUDIO_BUFFER_SIZE:
+            self.audio_buffer.append(data)
+            self.logger.debug(
+                f"Buffered audio frame: {len(data)} bytes "
+                f"(buffer size: {len(self.audio_buffer)})"
+            )
+        else:
+            self.logger.warning(
+                f"Audio buffer full ({len(self.audio_buffer)} frames), "
+                f"dropping frame to prevent overflow"
+            )
 
     async def handle_ping(self, msg: dict):
         pong_msg = {
@@ -479,13 +886,15 @@ class AudioHookServer:
             await asyncio.wait_for(self._send_json(closed_msg), timeout=4.0)
         except asyncio.TimeoutError:
             self.logger.error("Failed to send closed response within timeout")
-
+        
         duration = time.time() - self.start_time
         self.logger.info(
             f"Session stats - Duration: {duration:.2f}s, "
             f"Frames sent: {self.audio_frames_sent}, "
             f"Frames received: {self.audio_frames_received}"
         )
+        
+        await self.stop_audio_processing()
         await self.openai_client.close()
         self.running = False
 
@@ -493,8 +902,9 @@ class AudioHookServer:
         try:
             if not self.session_id:
                 return
+                    
             disconnect_msg = {
-                "version": "2",
+                "version": "2", 
                 "type": "disconnect",
                 "seq": self.server_seq + 1,
                 "clientseq": self.client_seq,
@@ -504,21 +914,22 @@ class AudioHookServer:
                     "info": info
                 }
             }
-
             self.server_seq += 1
             await asyncio.wait_for(self._send_json(disconnect_msg), timeout=5.0)
             try:
                 await asyncio.wait_for(self.ws.wait_closed(), timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning(f"Client did not acknowledge disconnect for session {self.session_id}")
-
         except Exception as e:
             logger.error(f"Error in disconnect_session: {e}")
         finally:
             self.running = False
+            await self.stop_audio_processing()
+            if self.openai_client:
+                await self.openai_client.close()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
-        if not self.openai_client.running:
+        if not self.openai_client or not self.openai_client.running:
             return
 
         self.audio_frames_received += 1
@@ -528,6 +939,14 @@ class AudioHookServer:
 
     async def _send_json(self, msg: dict):
         try:
+            if not await self.message_limiter.acquire():
+                current_rate = self.message_limiter.get_current_rate()
+                self.logger.warning(
+                    f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
+                    f"Message type: {msg.get('type')}. Dropping to maintain compliance."
+                )
+                return
+
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
         except websockets.ConnectionClosed:
@@ -674,7 +1093,8 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
-        await session.openai_client.close()
+        if session.openai_client:
+            await session.openai_client.close()
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
 
     except Exception as e:

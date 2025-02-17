@@ -10,14 +10,21 @@ from config import (
     GENESYS_LISTEN_HOST,
     GENESYS_LISTEN_PORT,
     GENESYS_PATH,
-    logger,
-    LOG_FILE,
-    DEBUG
+    DEBUG,  # We still read DEBUG from config if you like
 )
-
 from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
+
+# ---------------------------
+# Simple Logging Setup
+# ---------------------------
+if DEBUG == 'true':
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger("GenesysOpenAIBridge")
 
 
 async def validate_request(path, request_headers):
@@ -130,6 +137,7 @@ async def handle_genesys_connection(websocket):
 
         logger.info(f"[WS-{connection_id}] WebSocket connection established; handshake was validated beforehand.")
 
+        # Pass logger if you like, or each file can define their own
         session = AudioHookServer(websocket)
         logger.info(f"[WS-{connection_id}] Session created with ID: {session.session_id}")
 
@@ -182,19 +190,18 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: {os.path.abspath(LOG_FILE)}
+Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)
 
     websockets_logger = logging.getLogger('websockets')
+    # If you want to hide websockets debug logs in "non-debug" mode:
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
-    websockets_logger.addHandler(logging.FileHandler(LOG_FILE))
-
-    # Since DigitalOcean handles TLS, do not pass ssl=anything to websockets.serve
     try:
+        # If you let DO handle TLS, remove ssl= parameter
         async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
@@ -205,8 +212,7 @@ Log File: {os.path.abspath(LOG_FILE)}
         ):
             logger.info(
                 f"Server is listening for Genesys AudioHook connections on "
-                f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH} "
-                "(TLS is terminated by DigitalOcean)."
+                f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH}"
             )
 
             try:

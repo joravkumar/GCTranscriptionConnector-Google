@@ -5,10 +5,10 @@ import time
 import websockets
 import tempfile
 import audioop
+import logging
 from pydub import AudioSegment
 
 from config import (
-    logger,
     RATE_LIMIT_MAX_RETRIES,
     RATE_LIMIT_PHASES,
     GENESYS_MSG_RATE_LIMIT,
@@ -26,9 +26,10 @@ from config import (
 
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from openai_translation import translate_audio  # <-- Imported new translation logic
+from openai_translation import translate_audio
 
 from collections import deque
+logger = logging.getLogger("AudioHookServer")
 
 class AudioHookServer:
     def __init__(self, websocket):

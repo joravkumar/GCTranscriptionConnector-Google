@@ -4,7 +4,6 @@ import json
 import time
 import websockets
 import tempfile
-import aiohttp
 import audioop
 from pydub import AudioSegment
 
@@ -27,6 +26,7 @@ from config import (
 
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
+from openai_translation import translate_audio  # <-- Imported new translation logic
 
 from collections import deque
 
@@ -216,7 +216,6 @@ class AudioHookServer:
             self.running = False
             return
 
-        # Store negotiated media for later use (e.g. channel count)
         self.negotiated_media = chosen
 
         opened_msg = {
@@ -273,8 +272,7 @@ class AudioHookServer:
         if customer_data:
             self.logger.debug("Customer data provided for personalization")
 
-        # In Transcription Connector mode, we no longer initiate an OpenAI realtime client.
-        # Instead, we simply wait to accumulate incoming audio frames for transcription.
+        # In Transcription Connector mode, no realtime connection is initiated.
     
     async def handle_ping(self, msg: dict):
         pong_msg = {
@@ -295,7 +293,7 @@ class AudioHookServer:
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
         
         # Process the complete audio stream into a transcript via OpenAI translations API.
-        transcript_text = await self.process_translation()
+        transcript_text = await translate_audio(bytes(self.audio_stream), self.negotiated_media, self.logger)
         if transcript_text:
             self.logger.info(f"Transcript obtained: {transcript_text}")
             # Construct a transcript event message following the Transcript Entity Types.
@@ -392,72 +390,6 @@ class AudioHookServer:
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
         # Accumulate the incoming PCMU audio data for transcription.
         self.audio_stream.extend(frame_bytes)
-
-    async def process_translation(self) -> str:
-        if not self.audio_stream:
-            self.logger.warning("No audio data received for transcription.")
-            return ""
-        try:
-            # Determine number of channels from negotiated media; default to 1.
-            channels = 1
-            if self.negotiated_media and "channels" in self.negotiated_media:
-                channels = len(self.negotiated_media.get("channels", []))
-                if channels == 0:
-                    channels = 1
-            # Convert the accumulated PCMU (u-law) data to PCM16.
-            pcmu_data = bytes(self.audio_stream)
-            pcm16_data = audioop.ulaw2lin(pcmu_data, 2)
-            # Create an AudioSegment from the PCM16 data.
-            audio_segment = AudioSegment(
-                data=pcm16_data,
-                sample_width=2,
-                frame_rate=8000,
-                channels=channels
-            )
-            # Export the audio segment to an MP3 file.
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
-                temp_filename = temp_mp3.name
-            audio_segment.export(temp_filename, format="mp3")
-            self.logger.info(f"Exported audio to MP3 file: {temp_filename}")
-
-            # Prepare to send the MP3 file to OpenAI's translation endpoint.
-            openai_api_key = None
-            try:
-                from config import OPENAI_API_KEY
-                openai_api_key = OPENAI_API_KEY
-            except ImportError:
-                self.logger.error("OPENAI_API_KEY not found in config.")
-                return ""
-            headers = {
-                "Authorization": f"Bearer {openai_api_key}"
-            }
-            data = {
-                "model": "whisper-1",
-                "response_format": "json",
-                "temperature": "0"
-            }
-            async with aiohttp.ClientSession() as session:
-                with open(temp_filename, "rb") as f:
-                    form = aiohttp.FormData()
-                    form.add_field("file", f, filename="audio.mp3", content_type="audio/mpeg")
-                    for key, value in data.items():
-                        form.add_field(key, value)
-                    url = "https://api.openai.com/v1/audio/translations"
-                    async with session.post(url, data=form, headers=headers) as resp:
-                        if resp.status != 200:
-                            self.logger.error(f"OpenAI translation API returned status code {resp.status}")
-                            text = await resp.text()
-                            self.logger.error(f"Response: {text}")
-                            return ""
-                        response_json = await resp.json()
-            # Clean up the temporary file.
-            import os
-            os.remove(temp_filename)
-            transcript = response_json.get("text", "")
-            return transcript
-        except Exception as e:
-            self.logger.error(f"Error in processing translation: {e}", exc_info=True)
-            return ""
 
     async def _send_json(self, msg: dict):
         try:

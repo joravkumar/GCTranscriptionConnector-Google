@@ -11,7 +11,8 @@ from config import (
     GENESYS_LISTEN_HOST,
     GENESYS_LISTEN_PORT,
     GENESYS_PATH,
-    DEBUG
+    DEBUG,
+    GENESYS_API_KEY  # New import for Genesys API key
 )
 from audio_hook_server import AudioHookServer
 from utils import format_json
@@ -66,6 +67,11 @@ async def validate_request(path, request_headers):
             logger.info(f"[HTTP]   {k}: {'*' * 8}")
         else:
             logger.info(f"[HTTP]   {k}: {v}")
+
+    # Verify that the X-API-KEY header matches our configured GENESYS_API_KEY
+    if header_keys.get('x-api-key') != GENESYS_API_KEY:
+        logger.error("Invalid X-API-KEY header value.")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API key\n"
 
     missing_headers = []
     found_headers = []

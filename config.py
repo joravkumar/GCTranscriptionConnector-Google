@@ -1,9 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # if you want to load variables from .env
+load_dotenv()  # load variables from .env
 
-# Basic debug setting, if you still want to read it here
 DEBUG = os.getenv('DEBUG', 'false').lower()
 
 # Audio buffering settings
@@ -12,13 +11,13 @@ AUDIO_FRAME_SEND_INTERVAL = 0.15
 
 # Server settings
 GENESYS_LISTEN_HOST = "0.0.0.0"
-GENESYS_LISTEN_PORT = 443  # or int(os.getenv("PORT", "443")) if using DigitalOcean's $PORT
+GENESYS_LISTEN_PORT = int(os.getenv("PORT", "443"))
 GENESYS_PATH = "/audiohook"
 
-# OpenAI Realtime/Translation API settings
+# OpenAI Translation API settings
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables (.env or DO App config)")
+    raise ValueError("OPENAI_API_KEY not found in environment variables.")
 
 # Genesys rate limiting constants
 GENESYS_MSG_RATE_LIMIT = 5

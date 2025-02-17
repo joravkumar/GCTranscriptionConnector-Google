@@ -2,3 +2,4 @@ websockets
 aiohttp
 pydub
 python-dotenv
+openai

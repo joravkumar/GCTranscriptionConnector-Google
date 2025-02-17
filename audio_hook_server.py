@@ -15,15 +15,9 @@ from config import (
     GENESYS_BINARY_RATE_LIMIT,
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
-    DEFAULT_AGENT_NAME,
-    DEFAULT_COMPANY_NAME,
-    DEFAULT_MAX_OUTPUT_TOKENS,
     AUDIO_FRAME_SEND_INTERVAL,
-    MAX_AUDIO_BUFFER_SIZE,
-    ENDING_PROMPT,
-    ENDING_TEMPERATURE
+    MAX_AUDIO_BUFFER_SIZE
 )
-
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 from openai_translation import translate_audio
@@ -234,47 +228,6 @@ class AudioHookServer:
         await self._send_json(opened_msg)
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
-        input_vars = msg["parameters"].get("inputVariables", {})
-        voice = input_vars.get("OPENAI_VOICE", "sage")
-        instructions = input_vars.get("OPENAI_SYSTEM_PROMPT", "You are a helpful assistant.")
-        temperature = input_vars.get("OPENAI_TEMPERATURE")
-        model = input_vars.get("OPENAI_MODEL")
-        max_output_tokens = input_vars.get("OPENAI_MAX_OUTPUT_TOKENS")
-        language = input_vars.get("LANGUAGE")
-        customer_data = input_vars.get("CUSTOMER_DATA")
-        agent_name = input_vars.get("AGENT_NAME", DEFAULT_AGENT_NAME)
-        company_name = next((value for key, value in input_vars.items() 
-                            if key.strip() == "COMPANY_NAME"), DEFAULT_COMPANY_NAME)
-
-        self.logger.info(f"Using voice: {voice}")
-        self.logger.debug(f"Using instructions: {instructions}")
-        if temperature:
-            self.logger.debug(f"Using temperature: {temperature}")
-        if model:
-            self.logger.debug(f"Using model: {model}")
-        if max_output_tokens:
-            if str(max_output_tokens).lower() == 'inf':
-                max_output_tokens = "inf"
-            else:
-                try:
-                    tokens = int(max_output_tokens)
-                    if 1 <= tokens <= 4096:
-                        max_output_tokens = tokens
-                    else:
-                        self.logger.warning(f"max_output_tokens {tokens} out of range [1, 4096]. Using default: {DEFAULT_MAX_OUTPUT_TOKENS}")
-                        max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
-                except (TypeError, ValueError):
-                    self.logger.warning(f"Invalid max_output_tokens value: {max_output_tokens}. Using default: {DEFAULT_MAX_OUTPUT_TOKENS}")
-                    max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
-        else:
-            max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
-        if language:
-            self.logger.info(f"Enforcing language: {language}")
-        if customer_data:
-            self.logger.debug("Customer data provided for personalization")
-
-        # In Transcription Connector mode, no realtime connection is initiated.
-    
     async def handle_ping(self, msg: dict):
         pong_msg = {
             "version": "2",
@@ -382,7 +335,7 @@ class AudioHookServer:
             except asyncio.TimeoutError:
                 logger.warning(f"Client did not acknowledge disconnect for session {self.session_id}")
         except Exception as e:
-            logger.error(f"Error in disconnect_session: {e}")
+            self.logger.error(f"Error in disconnect_session: {e}")
         finally:
             self.running = False
 

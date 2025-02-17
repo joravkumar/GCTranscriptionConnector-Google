@@ -3,6 +3,10 @@ import uuid
 import json
 import time
 import websockets
+import tempfile
+import aiohttp
+import audioop
+from pydub import AudioSegment
 
 from config import (
     logger,
@@ -22,7 +26,6 @@ from config import (
 )
 
 from rate_limiter import RateLimiter
-from openai_client import OpenAIRealtimeClient
 from utils import format_json, parse_iso8601_duration
 
 from collections import deque
@@ -33,7 +36,7 @@ class AudioHookServer:
         self.ws = websocket
         self.client_seq = 0
         self.server_seq = 0
-        self.openai_client = None
+        self.openai_client = None  # Not used in transcription connector mode.
         self.running = True
         self.negotiated_media = None
         self.start_time = time.time()
@@ -50,50 +53,12 @@ class AudioHookServer:
         self.binary_limiter = RateLimiter(GENESYS_BINARY_RATE_LIMIT, GENESYS_BINARY_BURST_LIMIT)
 
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
-        self.audio_process_task = None
         self.last_frame_time = 0
 
+        # Buffer to accumulate the complete incoming PCMU audio stream.
+        self.audio_stream = bytearray()
+
         self.logger.info(f"New session started: {self.session_id}")        
-
-    async def start_audio_processing(self):
-        self.audio_process_task = asyncio.create_task(self._process_audio_buffer())
-
-    async def stop_audio_processing(self):
-        if self.audio_process_task:
-            self.audio_process_task.cancel()
-            try:
-                await self.audio_process_task
-            except asyncio.CancelledError:
-                pass
-            self.audio_process_task = None
-
-    async def _process_audio_buffer(self):
-        try:
-            while self.running:
-                if self.audio_buffer:
-                    now = time.time()
-                    if now - self.last_frame_time >= AUDIO_FRAME_SEND_INTERVAL:
-                        if await self.binary_limiter.acquire():
-                            frame = self.audio_buffer.popleft()
-                            try:
-                                await self.ws.send(frame)
-                                self.audio_frames_sent += 1
-                                self.last_frame_time = now
-                                self.logger.debug(
-                                    f"Sent audio frame from buffer: {len(frame)} bytes "
-                                    f"(frame #{self.audio_frames_sent}, buffer size: {len(self.audio_buffer)})"
-                                )
-                            except websockets.ConnectionClosed:
-                                self.logger.warning("Genesys WebSocket closed while sending audio frame.")
-                                self.running = False
-                                break
-                        else:
-                            await asyncio.sleep(AUDIO_FRAME_SEND_INTERVAL)
-                await asyncio.sleep(0.01)
-        except asyncio.CancelledError:
-            self.logger.info("Audio processing task cancelled")
-        except Exception as e:
-            self.logger.error(f"Error in audio processing task: {e}", exc_info=True)
 
     async def handle_error(self, msg: dict):
         error_code = msg["parameters"].get("code")
@@ -160,45 +125,14 @@ class AudioHookServer:
                 await self.disconnect_session(reason="error", info="Rate limit max retries exceeded")
                 return False
 
-            if self.openai_client:
-                self.openai_client.running = False
-            self.running = False
-
-            session_duration = time.time() - self.start_time
-
-            if retry_after is not None:
-                used_delay = retry_after
-                self.logger.info(
-                    f"[Rate Limit] Using provided retry delay: {used_delay}s. "
-                    f"Session: {self.session_id}"
-                )
-            else:
-                delay = None
-                for phase in RATE_LIMIT_PHASES:
-                    if session_duration <= phase["window"]:
-                        delay = phase["delay"]
-                        break
-                if delay is None:
-                    delay = RATE_LIMIT_PHASES[-1]["delay"]
-                used_delay = delay
-                self.logger.info(
-                    f"[Rate Limit] Using default exponential backoff delay: {used_delay}s. "
-                    f"Session: {self.session_id}"
-                )
-
             self.logger.warning(
                 f"[Rate Limit] Rate limited, attempt {self.rate_limit_state['retry_count']}/{RATE_LIMIT_MAX_RETRIES}. "
-                f"Backing off for {used_delay}s. "
+                f"Backing off for {retry_after if retry_after is not None else 'default delay'}s. "
                 f"Session: {self.session_id}, "
-                f"Duration: {session_duration:.2f}s"
+                f"Duration: {time.time() - self.start_time:.2f}s"
             )
 
-            await asyncio.sleep(used_delay)
-
-            self.running = True
-            if self.openai_client:
-                self.openai_client.running = True
-
+            await asyncio.sleep(retry_after if retry_after is not None else 3)
             self.rate_limit_state["in_backoff"] = False
             self.logger.info(
                 f"[Rate Limit] Backoff complete, resuming operations. "
@@ -282,6 +216,9 @@ class AudioHookServer:
             self.running = False
             return
 
+        # Store negotiated media for later use (e.g. channel count)
+        self.negotiated_media = chosen
+
         opened_msg = {
             "version": "2",
             "type": "opened",
@@ -336,69 +273,9 @@ class AudioHookServer:
         if customer_data:
             self.logger.debug("Customer data provided for personalization")
 
-        try:
-            self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
-            self.openai_client.language = language
-            self.openai_client.customer_data = customer_data
-            await self.openai_client.connect(
-                instructions=instructions,
-                voice=voice,
-                temperature=temperature,
-                model=model,
-                max_output_tokens=max_output_tokens,
-                agent_name=agent_name,
-                company_name=company_name
-            )
-        except Exception as e:
-            self.logger.error(f"OpenAI connection failed: {e}")
-            await self.disconnect_session(reason="error", info=str(e))
-            return
-
-        def on_audio_callback(pcmu_8k: bytes):
-            asyncio.create_task(self.handle_openai_audio(pcmu_8k))
-
-        await self.start_audio_processing()
-        await self.openai_client.start_receiving(on_audio_callback)
-
-    async def handle_speech_started(self):
-        event_msg = {
-            "version": "2",
-            "type": "event",
-            "seq": self.server_seq + 1,
-            "clientseq": self.client_seq,
-            "id": self.session_id,
-            "parameters": {
-                "entities": [
-                    {
-                        "type": "barge_in",
-                        "data": {}
-                    }
-                ]
-            }
-        }
-        self.server_seq += 1
-        await self._send_json(event_msg)
-
-    async def handle_openai_audio(self, pcmu_8k: bytes):
-        if not self.running:
-            return
-        self.logger.debug(f"Processing OpenAI audio frame: {len(pcmu_8k)} bytes")
-
-        await self.send_binary_to_genesys(pcmu_8k)
-
-    async def send_binary_to_genesys(self, data: bytes):
-        if len(self.audio_buffer) < MAX_AUDIO_BUFFER_SIZE:
-            self.audio_buffer.append(data)
-            self.logger.debug(
-                f"Buffered audio frame: {len(data)} bytes "
-                f"(buffer size: {len(self.audio_buffer)})"
-            )
-        else:
-            self.logger.warning(
-                f"Audio buffer full ({len(self.audio_buffer)} frames), "
-                f"dropping frame to prevent overflow"
-            )
-
+        # In Transcription Connector mode, we no longer initiate an OpenAI realtime client.
+        # Instead, we simply wait to accumulate incoming audio frames for transcription.
+    
     async def handle_ping(self, msg: dict):
         pong_msg = {
             "version": "2",
@@ -414,62 +291,48 @@ class AudioHookServer:
         except asyncio.TimeoutError:
             self.logger.error("Failed to send pong response within timeout")
 
-    async def generate_session_summary(self):
-        if not self.openai_client:
-            return None
-
-        try:
-            ending_prompt = {
-                "type": "response.create",
-                "response": {
-                    "conversation": "none",
-                    "modalities": ["text"],
-                    "metadata": {"type": "ending_analysis"},
-                    "instructions": ENDING_PROMPT,
-                    "temperature": ENDING_TEMPERATURE
-                }
-            }
-
-            await self.openai_client._safe_send(json.dumps(ending_prompt))
-            
-            summary = None
-            try:
-                async with asyncio.timeout(10): 
-                    while True:
-                        msg = await self.openai_client.ws.recv()
-                        data = json.loads(msg)
-                        if (data.get("type") == "response.done" and 
-                            data.get("response", {}).get("metadata", {}).get("type") == "ending_analysis"):
-                            summary = data.get("response", {}).get("output", [{}])[0].get("text")
-                            break
-                
-                # Parse JSON summary
-                if summary:
-                    try:
-                        summary_dict = json.loads(summary)
-                        return summary_dict
-                    except json.JSONDecodeError:
-                        self.logger.error("Failed to parse summary JSON")
-                        return {"error": "Failed to parse summary"}
-                    
-            except asyncio.TimeoutError:
-                self.logger.error("Timeout generating session summary")
-                return {"error": "Timeout generating summary"}
-                
-        except Exception as e:
-            self.logger.error(f"Error generating session summary: {e}")
-            return {"error": str(e)}
-
     async def handle_close(self, msg: dict):
-        """
-        Update the handle_close method to include summary generation
-        """
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
         
-        # Generate summary before closing
-        summary = await self.generate_session_summary()
-        if summary:
-            self.logger.info(f"Session summary: {summary}")
+        # Process the complete audio stream into a transcript via OpenAI translations API.
+        transcript_text = await self.process_translation()
+        if transcript_text:
+            self.logger.info(f"Transcript obtained: {transcript_text}")
+            # Construct a transcript event message following the Transcript Entity Types.
+            transcript_event = {
+                "version": "2",
+                "type": "event",
+                "seq": self.server_seq + 1,
+                "clientseq": self.client_seq,
+                "id": self.session_id,
+                "parameters": {
+                    "entities": [
+                        {
+                            "type": "transcript",
+                            "data": {
+                                "id": str(uuid.uuid4()),
+                                "channelId": "external",
+                                "isFinal": True,
+                                "alternatives": [
+                                    {
+                                        "confidence": 1.0,
+                                        "interpretations": [
+                                            {
+                                                "type": "display",
+                                                "transcript": transcript_text
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+            self.server_seq += 1
+            await self._send_json(transcript_event)
+        else:
+            self.logger.warning("No transcript generated from the audio stream.")
 
         closed_msg = {
             "version": "2",
@@ -478,7 +341,7 @@ class AudioHookServer:
             "clientseq": self.client_seq,
             "id": self.session_id,
             "parameters": {
-                "summary": summary
+                "summary": ""
             }
         }
         self.server_seq += 1
@@ -494,36 +357,12 @@ class AudioHookServer:
             f"Frames received: {self.audio_frames_received}"
         )
 
-        await self.stop_audio_processing()
-        if self.openai_client:
-            await self.openai_client.close()
         self.running = False
-
 
     async def disconnect_session(self, reason="completed", info=""):
         try:
             if not self.session_id:
                 return
-
-            # Generate summary before disconnecting
-            summary_data = await self.generate_session_summary()
-
-            # Get token usage from OpenAI client's last response if available
-            token_metrics = {"usage": {}}
-            if self.openai_client and hasattr(self.openai_client, 'last_response'):
-                usage = self.openai_client.last_response.get("usage", {})
-                token_details = usage.get("input_token_details", {})
-                cached_details = token_details.get("cached_tokens_details", {})
-                output_details = usage.get("output_token_details", {})
-                
-                token_metrics = {
-                    "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_AUDIO_TOKENS": str(token_details.get("audio_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cached_details.get("audio_tokens", 0)),
-                    "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
-                    "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
-                }
 
             disconnect_msg = {
                 "version": "2", 
@@ -534,11 +373,7 @@ class AudioHookServer:
                 "parameters": {
                     "reason": reason,
                     "info": info,
-                    "outputVariables": {
-                        "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
-                        "CONVERSATION_DURATION": str(time.time() - self.start_time),
-                        **token_metrics
-                    }
+                    "outputVariables": {}
                 }
             }
             self.server_seq += 1
@@ -551,18 +386,78 @@ class AudioHookServer:
             logger.error(f"Error in disconnect_session: {e}")
         finally:
             self.running = False
-            await self.stop_audio_processing()
-            if self.openai_client:
-                await self.openai_client.close()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
-        if not self.openai_client or not self.openai_client.running:
-            return
-
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
+        # Accumulate the incoming PCMU audio data for transcription.
+        self.audio_stream.extend(frame_bytes)
 
-        await self.openai_client.send_audio(frame_bytes)
+    async def process_translation(self) -> str:
+        if not self.audio_stream:
+            self.logger.warning("No audio data received for transcription.")
+            return ""
+        try:
+            # Determine number of channels from negotiated media; default to 1.
+            channels = 1
+            if self.negotiated_media and "channels" in self.negotiated_media:
+                channels = len(self.negotiated_media.get("channels", []))
+                if channels == 0:
+                    channels = 1
+            # Convert the accumulated PCMU (u-law) data to PCM16.
+            pcmu_data = bytes(self.audio_stream)
+            pcm16_data = audioop.ulaw2lin(pcmu_data, 2)
+            # Create an AudioSegment from the PCM16 data.
+            audio_segment = AudioSegment(
+                data=pcm16_data,
+                sample_width=2,
+                frame_rate=8000,
+                channels=channels
+            )
+            # Export the audio segment to an MP3 file.
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
+                temp_filename = temp_mp3.name
+            audio_segment.export(temp_filename, format="mp3")
+            self.logger.info(f"Exported audio to MP3 file: {temp_filename}")
+
+            # Prepare to send the MP3 file to OpenAI's translation endpoint.
+            openai_api_key = None
+            try:
+                from config import OPENAI_API_KEY
+                openai_api_key = OPENAI_API_KEY
+            except ImportError:
+                self.logger.error("OPENAI_API_KEY not found in config.")
+                return ""
+            headers = {
+                "Authorization": f"Bearer {openai_api_key}"
+            }
+            data = {
+                "model": "whisper-1",
+                "response_format": "json",
+                "temperature": "0"
+            }
+            async with aiohttp.ClientSession() as session:
+                with open(temp_filename, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("file", f, filename="audio.mp3", content_type="audio/mpeg")
+                    for key, value in data.items():
+                        form.add_field(key, value)
+                    url = "https://api.openai.com/v1/audio/translations"
+                    async with session.post(url, data=form, headers=headers) as resp:
+                        if resp.status != 200:
+                            self.logger.error(f"OpenAI translation API returned status code {resp.status}")
+                            text = await resp.text()
+                            self.logger.error(f"Response: {text}")
+                            return ""
+                        response_json = await resp.json()
+            # Clean up the temporary file.
+            import os
+            os.remove(temp_filename)
+            transcript = response_json.get("text", "")
+            return transcript
+        except Exception as e:
+            self.logger.error(f"Error in processing translation: {e}", exc_info=True)
+            return ""
 
     async def _send_json(self, msg: dict):
         try:

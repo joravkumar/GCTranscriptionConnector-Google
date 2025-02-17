@@ -5,23 +5,20 @@ import logging
 import websockets
 import http
 import os
-import ssl
 
 from config import (
     GENESYS_LISTEN_HOST,
     GENESYS_LISTEN_PORT,
     GENESYS_PATH,
-    ssl_context,
     logger,
     LOG_FILE,
-    DEBUG,
-    SSL_CERT_PATH,
-    SSL_KEY_PATH
+    DEBUG
 )
 
 from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
+
 
 async def validate_request(path, request_headers):
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
@@ -113,6 +110,7 @@ async def validate_request(path, request_headers):
     logger.info("="*50)
     return None
 
+
 async def handle_genesys_connection(websocket):
     connection_id = str(uuid.uuid4())[:8]
     logger.info(f"\n{'='*50}\n[WS-{connection_id}] New WebSocket connection handler started")
@@ -175,6 +173,7 @@ async def handle_genesys_connection(websocket):
     finally:
         logger.info(f"[WS-{connection_id}] Connection handler finished\n{'='*50}")
 
+
 async def main():
     startup_msg = f"""
 {'='*80}
@@ -183,7 +182,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-SSL: Public CA Signed Certs
 Log File: {os.path.abspath(LOG_FILE)}
 {'='*80}
 """
@@ -195,27 +193,21 @@ Log File: {os.path.abspath(LOG_FILE)}
 
     websockets_logger.addHandler(logging.FileHandler(LOG_FILE))
 
+    # Since DigitalOcean handles TLS, do not pass ssl=anything to websockets.serve
     try:
         async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
             GENESYS_LISTEN_PORT,
-            ssl=ssl_context,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
         ):
             logger.info(
                 f"Server is listening for Genesys AudioHook connections on "
-                f"wss://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH}"
+                f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH} "
+                "(TLS is terminated by DigitalOcean)."
             )
-
-            logger.info("SSL context info:")
-            logger.info(f"  Cert path: {SSL_CERT_PATH}")
-            logger.info(f"  Key path: {SSL_KEY_PATH}")
-            logger.info(f"  Protocol: {ssl_context.protocol}")
-            logger.info(f"  Verify mode: {ssl_context.verify_mode}")
-            logger.info(f"  Options: {ssl_context.options}")
 
             try:
                 await asyncio.Future()  # run forever
@@ -224,6 +216,7 @@ Log File: {os.path.abspath(LOG_FILE)}
     except Exception as e:
         logger.error(f"Failed to start server: {e}", exc_info=True)
         raise
+
 
 if __name__ == "__main__":
     try:

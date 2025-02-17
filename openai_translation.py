@@ -3,7 +3,7 @@ import os
 import audioop
 from pydub import AudioSegment
 import openai
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, OPENAI_TRANSCRIPTION_MODEL
 
 # Set the API key for the OpenAI SDK.
 openai.api_key = OPENAI_API_KEY
@@ -38,7 +38,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         # Open the MP3 file and use the OpenAI SDK to create a translation.
         with open(temp_filename, "rb") as audio_file:
             transcript_response = openai.Audio.translations.create(
-                model="whisper-1",
+                model=OPENAI_TRANSCRIPTION_MODEL,
                 file=audio_file,
                 response_format="json",
                 temperature=0

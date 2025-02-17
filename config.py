@@ -19,6 +19,9 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in environment variables.")
 
+# New environment variable for transcription model.
+OPENAI_TRANSCRIPTION_MODEL = os.getenv('OPENAI_TRANSCRIPTION_MODEL', 'whisper-1')
+
 # Genesys rate limiting constants
 GENESYS_MSG_RATE_LIMIT = 5
 GENESYS_BINARY_RATE_LIMIT = 5

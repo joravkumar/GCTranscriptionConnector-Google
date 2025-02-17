@@ -5,16 +5,16 @@ import logging
 import websockets
 import http
 import os
+from datetime import datetime
 
 from config import (
     GENESYS_LISTEN_HOST,
     GENESYS_LISTEN_PORT,
     GENESYS_PATH,
-    DEBUG,  # We still read DEBUG from config if you like
+    DEBUG
 )
 from audio_hook_server import AudioHookServer
 from utils import format_json
-from datetime import datetime
 
 # ---------------------------
 # Simple Logging Setup
@@ -137,7 +137,6 @@ async def handle_genesys_connection(websocket):
 
         logger.info(f"[WS-{connection_id}] WebSocket connection established; handshake was validated beforehand.")
 
-        # Pass logger if you like, or each file can define their own
         session = AudioHookServer(websocket)
         logger.info(f"[WS-{connection_id}] Session created with ID: {session.session_id}")
 
@@ -196,12 +195,10 @@ Log File: ./logging.txt  # Example
     logger.info(startup_msg)
 
     websockets_logger = logging.getLogger('websockets')
-    # If you want to hide websockets debug logs in "non-debug" mode:
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
     try:
-        # If you let DO handle TLS, remove ssl= parameter
         async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,

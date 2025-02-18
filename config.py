@@ -7,7 +7,6 @@ DEBUG = os.getenv('DEBUG', 'false').lower()
 
 # Audio buffering settings
 MAX_AUDIO_BUFFER_SIZE = 50
-AUDIO_FRAME_SEND_INTERVAL = 0.15
 
 # Server settings
 GENESYS_LISTEN_HOST = "0.0.0.0"
@@ -32,16 +31,9 @@ GENESYS_MSG_RATE_LIMIT = 5
 GENESYS_BINARY_RATE_LIMIT = 5
 GENESYS_MSG_BURST_LIMIT = 25
 GENESYS_BINARY_BURST_LIMIT = 25
-GENESYS_RATE_WINDOW = 1.0
 
 # Rate limiting constants 
 RATE_LIMIT_MAX_RETRIES = 3
-RATE_LIMIT_BASE_DELAY = 3
-RATE_LIMIT_WINDOW = 300
-RATE_LIMIT_PHASES = [
-    {"window": 300, "delay": 3},
-    {"window": 600, "delay": 9},
-    {"window": float('inf'), "delay": 27}
-]
 
+# Transcription Connector language support
 SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,en-US")

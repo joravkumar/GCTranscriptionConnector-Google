@@ -7,6 +7,7 @@ import tempfile
 import audioop
 import logging
 from pydub import AudioSegment
+from websockets.exceptions import ConnectionClosed
 
 from config import (
     RATE_LIMIT_MAX_RETRIES,
@@ -358,6 +359,6 @@ class AudioHookServer:
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
-        except websockets.ConnectionClosed:
+        except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False

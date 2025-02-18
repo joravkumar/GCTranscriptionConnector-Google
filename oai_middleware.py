@@ -240,13 +240,16 @@ Path: {GENESYS_PATH}
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
+    # Monkey-patch the default protocol with our custom protocol.
+    import websockets.server
+    websockets.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
+
     try:
         async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
             int(GENESYS_LISTEN_PORT),
             process_request=validate_request,
-            create_protocol=CustomWebSocketServerProtocol,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None

@@ -26,6 +26,16 @@ GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:
     raise ValueError("GENESYS_API_KEY not found in environment variables.")
 
+# New environment variable for Genesys Organization ID.
+GENESYS_ORG_ID = os.getenv('GENESYS_ORG_ID')
+if not GENESYS_ORG_ID:
+    raise ValueError("GENESYS_ORG_ID not found in environment variables.")
+
+# New environment variable for Genesys Client Secret.
+GENESYS_CLIENT_SECRET = os.getenv('GENESYS_CLIENT_SECRET')
+if not GENESYS_CLIENT_SECRET:
+    raise ValueError("GENESYS_CLIENT_SECRET not found in environment variables.")
+
 # Genesys rate limiting constants
 GENESYS_MSG_RATE_LIMIT = 5
 GENESYS_BINARY_RATE_LIMIT = 5
@@ -36,4 +46,4 @@ GENESYS_BINARY_BURST_LIMIT = 25
 RATE_LIMIT_MAX_RETRIES = 3
 
 # Transcription Connector language support
-SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,en-US")
+SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,it-IT,en-US")

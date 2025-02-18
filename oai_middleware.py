@@ -35,63 +35,64 @@ logger = logging.getLogger("GenesysOpenAIBridge")
 def verify_signature(signature_header, signature_input_header, headers, method, path):
     """
     Verifies the signature using HMAC-SHA256.
-    Expected signature header format: "sig1=:<base64 signature>:"
-    Expected signature-input header format:
-      sig1=("@request-target" "audiohook-session-id" "audiohook-organization-id" "audiohook-correlation-id" "x-api-key" "@authority");created=...;expires=...;keyid="...";nonce="...";alg="hmac-sha256"
+    Instead of using the order provided in the Signature-Input header,
+    we enforce a fixed canonical order:
+      1. @request-target
+      2. @authority
+      3. audiohook-organization-id
+      4. audiohook-correlation-id
+      5. audiohook-session-id
+      6. x-api-key
+    This ordering is chosen based on the IETF guidelines and the reference implementation.
     """
     logger.debug("Entering verify_signature...")
 
-    # Log the raw signature header (masked)
+    # Log the raw signature header, masking most of it.
     if len(signature_header) > 12:
         logger.debug(f"Raw signature_header (masked): {signature_header[:12]}... (len={len(signature_header)})")
     else:
         logger.debug(f"Raw signature_header: {signature_header}")
 
-    # Log the raw signature-input header (masked)
+    # Log the raw signature-input header, masking if long.
     if len(signature_input_header) > 50:
         logger.debug(f"Raw signature_input_header (masked): {signature_input_header[:50]}...")
     else:
         logger.debug(f"Raw signature_input_header: {signature_input_header}")
 
-    try:
-        if not signature_input_header.startswith("sig1="):
-            logger.debug("Signature input header does not start with 'sig1='.")
-            return False
-        sig_input = signature_input_header[len("sig1="):].strip()
-        if not (sig_input.startswith("(") and ")" in sig_input):
-            logger.debug("Signature input header missing parentheses.")
-            return False
-        end_paren_index = sig_input.find(")")
-        headers_part = sig_input[1:end_paren_index]
-        header_list = headers_part.split()
-        header_list = [h.strip('"') for h in header_list]
-    except Exception as e:
-        logger.error(f"Error parsing signature input: {e}")
-        return False
-
-    logger.debug(f"Header list to be signed: {header_list}")
+    # Enforce a fixed canonical order for covered components.
+    canonical_order = [
+        "@request-target",
+        "@authority",
+        "audiohook-organization-id",
+        "audiohook-correlation-id",
+        "audiohook-session-id",
+        "x-api-key"
+    ]
+    logger.debug(f"Using fixed canonical order: {canonical_order}")
 
     # Build the signing string using LF ("\n") as the separator.
+    # For each component in our fixed order, look up its value.
     signing_lines = []
-    for header in header_list:
-        if header == "@request-target":
-            # Use uppercase HTTP method per specification.
+    for comp in canonical_order:
+        if comp == "@request-target":
             line = f"@request-target: {method.upper()} {path}"
             signing_lines.append(line)
-        elif header == "@authority":
-            if "host" in headers:
-                line = f"@authority: {headers['host']}"
-                signing_lines.append(line)
-            else:
-                logger.debug("Missing 'host' in headers while building signing string.")
+        elif comp == "@authority":
+            if "host" not in headers:
+                logger.debug("Missing 'host' header for @authority component.")
                 return False
+            line = f"@authority: {headers['host'].strip()}"
+            signing_lines.append(line)
         else:
-            if header.lower() not in headers:
-                logger.debug(f"Missing header '{header}' in the request.")
+            # For HTTP header components, use the lowercased header name.
+            if comp not in headers:
+                logger.debug(f"Missing required header '{comp}' in request.")
                 return False
-            line = f"{header.lower()}: {headers[header.lower()]}"
+            # Trim the header value.
+            line = f"{comp}: {headers[comp].strip()}"
             signing_lines.append(line)
 
+    # Join with LF (per our testing, the client uses LF)
     signing_string = "\n".join(signing_lines)
     logger.debug(f"Constructed signing string:\n{signing_string}")
 
@@ -332,7 +333,7 @@ async def handle_genesys_connection(websocket):
 async def main():
     startup_msg = f"""
 {'='*80}
-Genesys-OpenAI Bridging Server
+Genesys-OpenAIBridge Server
 Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}

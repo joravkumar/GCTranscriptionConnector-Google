@@ -16,8 +16,7 @@ from config import (
     GENESYS_PATH,
     DEBUG,
     GENESYS_API_KEY,
-    GENESYS_ORG_ID,
-    GENESYS_CLIENT_SECRET
+    GENESYS_ORG_ID
 )
 from audio_hook_server import AudioHookServer
 from utils import format_json
@@ -32,111 +31,11 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
-def verify_signature(signature_header, signature_input_header, headers, method, path):
-    """
-    Verifies the signature using HMAC-SHA256.
-    Instead of using the order provided in the Signature-Input header,
-    we enforce a fixed canonical order:
-      1. @request-target
-      2. @authority
-      3. audiohook-organization-id
-      4. audiohook-correlation-id
-      5. audiohook-session-id
-      6. x-api-key
-    This ordering is chosen based on the IETF guidelines and the reference implementation.
-    """
-    logger.debug("Entering verify_signature...")
-
-    # Log the raw signature header, masking most of it.
-    if len(signature_header) > 12:
-        logger.debug(f"Raw signature_header (masked): {signature_header[:12]}... (len={len(signature_header)})")
-    else:
-        logger.debug(f"Raw signature_header: {signature_header}")
-
-    # Log the raw signature-input header, masking if long.
-    if len(signature_input_header) > 50:
-        logger.debug(f"Raw signature_input_header (masked): {signature_input_header[:50]}...")
-    else:
-        logger.debug(f"Raw signature_input_header: {signature_input_header}")
-
-    # Enforce a fixed canonical order for covered components.
-    canonical_order = [
-        "@request-target",
-        "@authority",
-        "audiohook-organization-id",
-        "audiohook-correlation-id",
-        "audiohook-session-id",
-        "x-api-key"
-    ]
-    logger.debug(f"Using fixed canonical order: {canonical_order}")
-
-    # Build the signing string using LF ("\n") as the separator.
-    # For each component in our fixed order, look up its value.
-    signing_lines = []
-    for comp in canonical_order:
-        if comp == "@request-target":
-            line = f"@request-target: {method.upper()} {path}"
-            signing_lines.append(line)
-        elif comp == "@authority":
-            if "host" not in headers:
-                logger.debug("Missing 'host' header for @authority component.")
-                return False
-            line = f"@authority: {headers['host'].strip()}"
-            signing_lines.append(line)
-        else:
-            # For HTTP header components, use the lowercased header name.
-            if comp not in headers:
-                logger.debug(f"Missing required header '{comp}' in request.")
-                return False
-            # Trim the header value.
-            line = f"{comp}: {headers[comp].strip()}"
-            signing_lines.append(line)
-
-    # Join with LF (per our testing, the client uses LF)
-    signing_string = "\n".join(signing_lines)
-    logger.debug(f"Constructed signing string:\n{signing_string}")
-
-    # Decode the client secret from base64.
-    try:
-        decoded_secret = base64.b64decode(GENESYS_CLIENT_SECRET)
-        logger.debug(f"Decoded client secret length: {len(decoded_secret)} bytes")
-    except Exception as e:
-        logger.error(f"Failed to base64-decode GENESYS_CLIENT_SECRET: {e}")
-        return False
-
-    computed_hmac = hmac.new(
-        decoded_secret,
-        signing_string.encode('utf-8'),
-        hashlib.sha256
-    ).digest()
-    computed_signature = base64.b64encode(computed_hmac).decode('utf-8')
-
-    logger.debug(f"Computed HMAC (hex): {computed_hmac.hex()}")
-
-    if not signature_header.startswith("sig1=:") or not signature_header.endswith(":"):
-        logger.debug("Signature header format is invalid (missing 'sig1=:' prefix or ':' suffix).")
-        return False
-
-    provided_signature_b64 = signature_header[len("sig1=:"):-1]
-    try:
-        provided_signature_bytes = base64.b64decode(provided_signature_b64)
-        logger.debug(f"Provided signature (hex): {provided_signature_bytes.hex()}")
-    except Exception as e:
-        logger.error(f"Failed to base64-decode provided signature: {e}")
-        return False
-
-    logger.debug(f"Computed signature (base64, first 10 chars): {computed_signature[:10]}...")
-    logger.debug(f"Provided signature (base64, first 10 chars): {provided_signature_b64[:10]}...")
-
-    is_match = hmac.compare_digest(computed_signature, provided_signature_b64)
-    logger.debug(f"Signature match result: {is_match}")
-    return is_match
-
-
 async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
     before upgrading to a WebSocket.
+    Signature verification is now disabled, and only the API key is required.
     In newer versions of websockets, 'path' may not be a string. We attempt to
     extract a proper path string from it if needed.
     """
@@ -248,24 +147,10 @@ async def validate_request(path, request_headers):
     if 'upgrade' not in connection_header:
         logger.warning("[HTTP] Connection header doesn't contain 'upgrade'")
 
-    if 'signature' in header_keys:
-        logger.info("[HTTP] Received Signature header.")
-    if 'signature-input' in header_keys:
-        logger.info("[HTTP] Received Signature-Input header.")
-
-    if GENESYS_CLIENT_SECRET:
-        if 'signature' not in header_keys or 'signature-input' not in header_keys:
-            logger.error("Missing signature headers despite client secret being configured.")
-            return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Missing signature headers\n")
-        if not verify_signature(header_keys['signature'], header_keys['signature-input'], header_keys, "GET", path_str):
-            logger.error("Invalid signature.")
-            return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid signature\n")
-
     logger.info("[HTTP] All validation checks passed successfully")
     logger.info(f"[HTTP] Proceeding with WebSocket upgrade")
     logger.info("="*50)
     return None
-
 
 async def handle_genesys_connection(websocket):
     connection_id = str(uuid.uuid4())[:8]
@@ -329,7 +214,6 @@ async def handle_genesys_connection(websocket):
     finally:
         logger.info(f"[WS-{connection_id}] Connection handler finished\n{'='*50}")
 
-
 async def main():
     startup_msg = f"""
 {'='*80}
@@ -338,7 +222,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)
@@ -369,7 +252,6 @@ Log File: ./logging.txt  # Example
     except Exception as e:
         logger.error(f"Failed to start server: {e}", exc_info=True)
         raise
-
 
 if __name__ == "__main__":
     try:

@@ -6,6 +6,7 @@ import websockets
 import http
 import os
 from datetime import datetime
+from websockets.server import WebSocketServerProtocol
 
 from config import (
     GENESYS_LISTEN_HOST,
@@ -29,12 +30,11 @@ else:
 logger = logging.getLogger("GenesysOpenAIBridge")
 
 # --- Custom Protocol to gracefully handle handshake errors ---
-class CustomWebSocketServerProtocol(websockets.server.WebSocketServerProtocol):
+class CustomWebSocketServerProtocol(WebSocketServerProtocol):
     async def handshake(self, *args, **kwargs):
         try:
             return await super().handshake(*args, **kwargs)
         except Exception as e:
-            # Log the handshake error at debug level and close the connection gracefully.
             logger.debug(f"Handshake error caught in custom protocol: {e}")
             self.close()
             raise
@@ -230,7 +230,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)

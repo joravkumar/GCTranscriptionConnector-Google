@@ -73,10 +73,11 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     logger.debug(f"Header list to be signed: {header_list}")
 
     # Build the signing string according to the headers list.
+    # Use CRLF (\r\n) as the separator.
     signing_lines = []
     for header in header_list:
         if header == "@request-target":
-            # Using uppercase HTTP method now per testing
+            # Using uppercase HTTP method as required.
             line = f"@request-target: {method.upper()} {path}"
             signing_lines.append(line)
         elif header == "@authority":
@@ -93,7 +94,7 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
             line = f"{header.lower()}: {headers[header.lower()]}"
             signing_lines.append(line)
 
-    signing_string = "\n".join(signing_lines)
+    signing_string = "\r\n".join(signing_lines)
     logger.debug(f"Constructed signing string:\n{signing_string}")
 
     # Decode the client secret from base64.
@@ -349,6 +350,7 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
+Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)

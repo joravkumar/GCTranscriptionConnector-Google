@@ -41,20 +41,19 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     """
     logger.debug("Entering verify_signature...")
 
-    # Log the raw signature header, masking most of it.
+    # Log the raw signature header (masked)
     if len(signature_header) > 12:
         logger.debug(f"Raw signature_header (masked): {signature_header[:12]}... (len={len(signature_header)})")
     else:
         logger.debug(f"Raw signature_header: {signature_header}")
 
-    # Log the raw signature-input header, masking if long.
+    # Log the raw signature-input header (masked)
     if len(signature_input_header) > 50:
         logger.debug(f"Raw signature_input_header (masked): {signature_input_header[:50]}...")
     else:
         logger.debug(f"Raw signature_input_header: {signature_input_header}")
 
     try:
-        # Parse signature-input header to extract the list of headers.
         if not signature_input_header.startswith("sig1="):
             logger.debug("Signature input header does not start with 'sig1='.")
             return False
@@ -72,12 +71,11 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 
     logger.debug(f"Header list to be signed: {header_list}")
 
-    # Build the signing string according to the headers list.
-    # Use CRLF (\r\n) as the separator.
+    # Build the signing string using LF ("\n") as the separator.
     signing_lines = []
     for header in header_list:
         if header == "@request-target":
-            # Using uppercase HTTP method as required.
+            # Use uppercase HTTP method per specification.
             line = f"@request-target: {method.upper()} {path}"
             signing_lines.append(line)
         elif header == "@authority":
@@ -94,7 +92,7 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
             line = f"{header.lower()}: {headers[header.lower()]}"
             signing_lines.append(line)
 
-    signing_string = "\r\n".join(signing_lines)
+    signing_string = "\n".join(signing_lines)
     logger.debug(f"Constructed signing string:\n{signing_string}")
 
     # Decode the client secret from base64.
@@ -105,7 +103,6 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
         logger.error(f"Failed to base64-decode GENESYS_CLIENT_SECRET: {e}")
         return False
 
-    # Compute the HMAC signature.
     computed_hmac = hmac.new(
         decoded_secret,
         signing_string.encode('utf-8'),
@@ -113,10 +110,8 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     ).digest()
     computed_signature = base64.b64encode(computed_hmac).decode('utf-8')
 
-    # For deeper debugging, also log hex representations.
     logger.debug(f"Computed HMAC (hex): {computed_hmac.hex()}")
-    
-    # Extract the provided signature.
+
     if not signature_header.startswith("sig1=:") or not signature_header.endswith(":"):
         logger.debug("Signature header format is invalid (missing 'sig1=:' prefix or ':' suffix).")
         return False
@@ -144,7 +139,6 @@ async def validate_request(path, request_headers):
     In newer versions of websockets, 'path' may not be a string. We attempt to
     extract a proper path string from it if needed.
     """
-    # Attempt to convert 'path' to a proper string:
     if not isinstance(path, str):
         if hasattr(path, "resource"):
             path_str = path.resource
@@ -157,7 +151,6 @@ async def validate_request(path, request_headers):
     else:
         path_str = path
 
-    # Convert request_headers to a dictionary.
     if hasattr(request_headers, "headers"):
         raw_headers = dict(request_headers.headers)
     else:
@@ -174,7 +167,6 @@ async def validate_request(path, request_headers):
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    # Perform the path comparison.
     normalized_path = path_str.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
     if normalized_path != normalized_target:
@@ -194,7 +186,6 @@ async def validate_request(path, request_headers):
         'sec-websocket-key'
     ]
 
-    # Lowercase all keys for consistent lookups.
     header_keys = {k.lower(): v for k, v in raw_headers.items()}
     logger.info("[HTTP] Normalized headers for validation:")
     for k, v in header_keys.items():
@@ -203,12 +194,10 @@ async def validate_request(path, request_headers):
         else:
             logger.info(f"[HTTP]   {k}: {v}")
 
-    # Verify X-API-KEY header.
     if header_keys.get('x-api-key') != GENESYS_API_KEY:
         logger.error("Invalid X-API-KEY header value.")
         return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid API key\n")
 
-    # Verify Audiohook-Organization-Id matches expected organization.
     if header_keys.get('audiohook-organization-id') != GENESYS_ORG_ID:
         logger.error("Invalid Audiohook-Organization-Id header value.")
         return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid Audiohook-Organization-Id\n")
@@ -258,13 +247,11 @@ async def validate_request(path, request_headers):
     if 'upgrade' not in connection_header:
         logger.warning("[HTTP] Connection header doesn't contain 'upgrade'")
 
-    # Log optional signature headers if provided.
     if 'signature' in header_keys:
         logger.info("[HTTP] Received Signature header.")
     if 'signature-input' in header_keys:
         logger.info("[HTTP] Received Signature-Input header.")
 
-    # If a client secret is configured, verify that signature headers exist and are valid.
     if GENESYS_CLIENT_SECRET:
         if 'signature' not in header_keys or 'signature-input' not in header_keys:
             logger.error("Missing signature headers despite client secret being configured.")

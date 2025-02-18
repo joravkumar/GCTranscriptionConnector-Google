@@ -174,8 +174,7 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
-        if session and session.openai_client:
-            await session.openai_client.close()
+        # Removed openai_client cleanup since it's not defined in AudioHookServer
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
 
     except Exception as e:
@@ -209,6 +208,7 @@ Log File: ./logging.txt  # Example
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
             GENESYS_LISTEN_PORT,
+            process_request=validate_request,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None

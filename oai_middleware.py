@@ -90,18 +90,22 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
-    before upgrading to a WebSocket. However, newer versions of 'websockets'
-    may pass a non-string 'path' object. We convert it to a string here.
+    before upgrading to a WebSocket.
+    Newer versions of 'websockets' may pass a non-string 'path' (such as a ServerConnection).
+    Here we attempt to extract a proper path string from the object.
     """
-    # Convert 'path' to a string if it's not already.
+    # Convert 'path' to a proper string:
     if not isinstance(path, str):
-        # Attempt to extract the path string if possible, else default to str(path).
-        possible_path_str = getattr(path, 'path', None)
-        path_str = possible_path_str if possible_path_str is not None else str(path)
+        if hasattr(path, "resource"):
+            path_str = path.resource
+        elif hasattr(path, "path"):
+            path_str = path.path
+        else:
+            path_str = str(path)
     else:
         path_str = path
 
-    # Convert the request_headers to a dictionary if it's a Request object.
+    # Convert request_headers to a dictionary.
     if hasattr(request_headers, "headers"):
         raw_headers = dict(request_headers.headers)
     else:
@@ -274,6 +278,8 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
+        if session and session.openai_client:
+            await session.openai_client.close()
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
 
     except Exception as e:

@@ -41,12 +41,28 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
       "audiohook-correlation-id" "x-api-key");keyid="..."; nonce="...";alg="hmac-sha256";created=...;expires=...
     """
 
+    logger.debug("Entering verify_signature...")
+
+    # Log the raw signature header, but mask most of it.
+    if len(signature_header) > 12:
+        logger.debug(f"Raw signature_header (partially masked): {signature_header[:12]}... (len={len(signature_header)})")
+    else:
+        logger.debug(f"Raw signature_header: {signature_header}")
+
+    # Log the raw signature-input header, but mask it if long.
+    if len(signature_input_header) > 50:
+        logger.debug(f"Raw signature_input_header (partially masked): {signature_input_header[:50]}...")
+    else:
+        logger.debug(f"Raw signature_input_header: {signature_input_header}")
+
     try:
         # Parse signature-input header to extract the list of headers.
         if not signature_input_header.startswith("sig1="):
+            logger.debug("Signature input header does not start with 'sig1='.")
             return False
         sig_input = signature_input_header[len("sig1="):].strip()
         if not (sig_input.startswith("(") and ")" in sig_input):
+            logger.debug("Signature input header missing parentheses.")
             return False
         end_paren_index = sig_input.find(")")
         headers_part = sig_input[1:end_paren_index]
@@ -56,26 +72,45 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
         logger.error(f"Error parsing signature input: {e}")
         return False
 
+    logger.debug(f"Header list to be signed: {header_list}")
+
     # Build the signing string according to the headers list.
     signing_lines = []
     for header in header_list:
         if header == "@request-target":
-            signing_lines.append(f"@request-target: {method.lower()} {path}")
+            line = f"@request-target: {method.lower()} {path}"
+            signing_lines.append(line)
         elif header == "@authority":
             if "host" in headers:
-                signing_lines.append(f"@authority: {headers['host']}")
+                line = f"@authority: {headers['host']}"
+                signing_lines.append(line)
             else:
+                logger.debug("Missing 'host' in headers while building signing string.")
                 return False
         else:
             if header.lower() not in headers:
+                logger.debug(f"Missing header '{header}' in the request.")
                 return False
-            signing_lines.append(f"{header.lower()}: {headers[header.lower()]}")
+            line = f"{header.lower()}: {headers[header.lower()]}"
+            signing_lines.append(line)
 
     signing_string = "\n".join(signing_lines)
+
+    # For debugging, show the signing string but mask the x-api-key if present:
+    masked_signing_string = signing_string
+    if "x-api-key:" in masked_signing_string:
+        # Attempt to mask only the value after 'x-api-key: '
+        masked_signing_string = masked_signing_string.replace(
+            f"x-api-key: {headers['x-api-key']}",
+            "x-api-key: ****"
+        )
+
+    logger.debug(f"Constructed signing string:\n{masked_signing_string}")
 
     # Genesys docs: the client secret is base64-encoded, so decode it first.
     try:
         decoded_secret = base64.b64decode(GENESYS_CLIENT_SECRET)
+        logger.debug(f"Decoded client secret length: {len(decoded_secret)} bytes")
     except Exception as e:
         logger.error(f"Failed to base64-decode GENESYS_CLIENT_SECRET: {e}")
         return False
@@ -89,10 +124,18 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 
     # Extract the provided signature.
     if not signature_header.startswith("sig1=:") or not signature_header.endswith(":"):
+        logger.debug("Signature header format is invalid (missing 'sig1=:' prefix or ':' suffix).")
         return False
+
     provided_signature = signature_header[len("sig1=:"):-1]
 
-    return hmac.compare_digest(computed_signature, provided_signature)
+    # Show partial logs for computed vs. provided signature
+    logger.debug(f"Computed signature (first 10 chars): {computed_signature[:10]}...")
+    logger.debug(f"Provided signature (first 10 chars): {provided_signature[:10]}...")
+
+    is_match = hmac.compare_digest(computed_signature, provided_signature)
+    logger.debug(f"Signature match result: {is_match}")
+    return is_match
 
 
 async def validate_request(path, request_headers):
@@ -308,7 +351,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)

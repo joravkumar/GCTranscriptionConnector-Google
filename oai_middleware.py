@@ -6,9 +6,6 @@ import websockets
 import http
 import os
 from datetime import datetime
-import hmac
-import hashlib
-import base64
 
 from config import (
     GENESYS_LISTEN_HOST,
@@ -31,11 +28,22 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
+# --- Custom Protocol to gracefully handle handshake errors ---
+class CustomWebSocketServerProtocol(websockets.server.WebSocketServerProtocol):
+    async def handshake(self, *args, **kwargs):
+        try:
+            return await super().handshake(*args, **kwargs)
+        except Exception as e:
+            # Log the handshake error at debug level and close the connection gracefully.
+            logger.debug(f"Handshake error caught in custom protocol: {e}")
+            self.close()
+            raise
+
 async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
     before upgrading to a WebSocket.
-    Signature verification is now disabled, and only the API key is required.
+    Signature verification is disabled; only the API key is required.
     In newer versions of websockets, 'path' may not be a string. We attempt to
     extract a proper path string from it if needed.
     """
@@ -222,6 +230,7 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
+Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)
@@ -236,6 +245,7 @@ Path: {GENESYS_PATH}
             GENESYS_LISTEN_HOST,
             GENESYS_LISTEN_PORT,
             process_request=validate_request,
+            create_protocol=CustomWebSocketServerProtocol,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None

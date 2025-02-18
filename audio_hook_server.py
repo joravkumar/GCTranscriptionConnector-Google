@@ -16,7 +16,8 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     AUDIO_FRAME_SEND_INTERVAL,
-    MAX_AUDIO_BUFFER_SIZE
+    MAX_AUDIO_BUFFER_SIZE,
+    SUPPORTED_LANGUAGES
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
@@ -172,6 +173,8 @@ class AudioHookServer:
 
         if is_probe:
             self.logger.info("Detected probe connection")
+            # Prepare supported languages list from the comma-separated config value.
+            supported_langs = [lang.strip() for lang in SUPPORTED_LANGUAGES.split(",")]
             opened_msg = {
                 "version": "2",
                 "type": "opened",
@@ -180,7 +183,8 @@ class AudioHookServer:
                 "id": self.session_id,
                 "parameters": {
                     "startPaused": False,
-                    "media": []
+                    "media": [],
+                    "supportedLanguages": supported_langs
                 }
             }
             self.server_seq += 1

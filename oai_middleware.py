@@ -70,8 +70,9 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
             if header.lower() not in headers:
                 return False
             signing_lines.append(f"{header.lower()}: {headers[header.lower()]}")
+
     signing_string = "\n".join(signing_lines)
-    
+
     computed_hmac = hmac.new(
         GENESYS_CLIENT_SECRET.encode('utf-8'),
         signing_string.encode('utf-8'),
@@ -91,15 +92,19 @@ async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
     before upgrading to a WebSocket.
-    Newer versions of 'websockets' may pass a non-string 'path' (such as a ServerConnection).
-    Here we attempt to extract a proper path string from the object.
+    In newer versions of websockets, 'path' may not be a string. We attempt to
+    extract a proper path string from it if needed.
     """
-    # Convert 'path' to a proper string:
+    # Attempt to convert 'path' to a proper string:
     if not isinstance(path, str):
         if hasattr(path, "resource"):
             path_str = path.resource
         elif hasattr(path, "path"):
             path_str = path.path
+        elif hasattr(path, "request") and hasattr(path.request, "path"):
+            # Newer websockets often pass a ServerConnection object that
+            # has a 'request' attribute with a 'path' string.
+            path_str = path.request.path
         else:
             path_str = str(path)
     else:
@@ -131,7 +136,7 @@ async def validate_request(path, request_headers):
         logger.error(f"[HTTP]   Expected: {GENESYS_PATH}")
         logger.error(f"[HTTP]   Normalized received: {normalized_path}")
         logger.error(f"[HTTP]   Normalized expected: {normalized_target}")
-        return http.HTTPStatus.NOT_FOUND, [], b'Invalid path\n'
+        return (http.HTTPStatus.NOT_FOUND.value, [], b'Invalid path\n')
 
     required_headers = [
         'audiohook-organization-id',
@@ -155,12 +160,12 @@ async def validate_request(path, request_headers):
     # Verify X-API-KEY header.
     if header_keys.get('x-api-key') != GENESYS_API_KEY:
         logger.error("Invalid X-API-KEY header value.")
-        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API key\n"
+        return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid API key\n")
 
     # Verify Audiohook-Organization-Id matches expected organization.
     if header_keys.get('audiohook-organization-id') != GENESYS_ORG_ID:
         logger.error("Invalid Audiohook-Organization-Id header value.")
-        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid Audiohook-Organization-Id\n"
+        return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid Audiohook-Organization-Id\n")
 
     missing_headers = []
     found_headers = []
@@ -174,26 +179,26 @@ async def validate_request(path, request_headers):
         error_msg = f"Missing required headers: {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return http.HTTPStatus.UNAUTHORIZED, [], error_msg.encode()
+        return (http.HTTPStatus.UNAUTHORIZED.value, [], error_msg.encode())
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
     if upgrade_header != 'websocket':
         error_msg = f"Invalid upgrade header: {upgrade_header}"
         logger.error(f"[HTTP] {error_msg}")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket upgrade required\n'
+        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket upgrade required\n')
 
     ws_version = header_keys.get('sec-websocket-version', '')
     logger.info(f"[HTTP] Checking WebSocket version: {ws_version}")
     if ws_version != '13':
         error_msg = f"Invalid WebSocket version: {ws_version}"
         logger.error(f"[HTTP] {error_msg}")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket version 13 required\n'
+        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket version 13 required\n')
 
     ws_key = header_keys.get('sec-websocket-key')
     if not ws_key:
         logger.error("[HTTP] Missing WebSocket key")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket key required\n'
+        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket key required\n')
     logger.info("[HTTP] Found valid WebSocket key")
 
     ws_protocol = header_keys.get('sec-websocket-protocol', '')
@@ -217,10 +222,10 @@ async def validate_request(path, request_headers):
     if GENESYS_CLIENT_SECRET:
         if 'signature' not in header_keys or 'signature-input' not in header_keys:
             logger.error("Missing signature headers despite client secret being configured.")
-            return http.HTTPStatus.UNAUTHORIZED, [], b"Missing signature headers\n"
+            return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Missing signature headers\n")
         if not verify_signature(header_keys['signature'], header_keys['signature-input'], header_keys, "GET", path_str):
             logger.error("Invalid signature.")
-            return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid signature\n"
+            return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid signature\n")
 
     logger.info("[HTTP] All validation checks passed successfully")
     logger.info(f"[HTTP] Proceeding with WebSocket upgrade")
@@ -278,7 +283,7 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
-        if session and session.openai_client:
+        if session and hasattr(session, 'openai_client') and session.openai_client:
             await session.openai_client.close()
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
 

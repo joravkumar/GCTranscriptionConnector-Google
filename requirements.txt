@@ -2,4 +2,4 @@ websockets==15.0
 aiohttp
 pydub
 python-dotenv
-openai
+openai==1.63.2

@@ -88,12 +88,24 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 
 
 async def validate_request(path, request_headers):
+    """
+    This function is called by websockets.serve() to validate the HTTP request
+    before upgrading to a WebSocket. In newer versions of 'websockets', request_headers
+    is a 'Request' object, so we convert its 'headers' to a dictionary for easy lookups.
+    """
+    # Convert the websockets Request object to a dictionary of headers.
+    # If it's already a dict-like object, this call won't break anything.
+    if hasattr(request_headers, "headers"):
+        raw_headers = dict(request_headers.headers)
+    else:
+        raw_headers = dict(request_headers)
+
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
     logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
-    logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
+    logger.info(f"[HTTP] Remote address: {raw_headers.get('Host', 'unknown')}")
 
     logger.info("[HTTP] Full headers received:")
-    for name, value in request_headers.items():
+    for name, value in raw_headers.items():
         if name.lower() in ['x-api-key', 'authorization']:
             logger.info(f"[HTTP]   {name}: {'*' * 8}")
         else:
@@ -119,7 +131,8 @@ async def validate_request(path, request_headers):
         'sec-websocket-key'
     ]
 
-    header_keys = {k.lower(): v for k, v in request_headers.items()}
+    # Lowercase all keys for consistent lookups.
+    header_keys = {k.lower(): v for k, v in raw_headers.items()}
     logger.info("[HTTP] Normalized headers for validation:")
     for k, v in header_keys.items():
         if k in ['x-api-key', 'authorization']:
@@ -253,7 +266,6 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
-        # Removed openai_client cleanup since it's not defined in AudioHookServer
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
 
     except Exception as e:

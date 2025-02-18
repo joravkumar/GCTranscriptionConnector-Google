@@ -43,3 +43,5 @@ RATE_LIMIT_PHASES = [
     {"window": 600, "delay": 9},
     {"window": float('inf'), "delay": 27}
 ]
+
+SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,en-US")

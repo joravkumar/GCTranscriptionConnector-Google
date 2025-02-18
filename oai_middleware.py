@@ -6,7 +6,9 @@ import websockets
 import http
 import os
 from datetime import datetime
-from websockets.server import WebSocketServerProtocol
+import hmac
+import hashlib
+import base64
 
 from config import (
     GENESYS_LISTEN_HOST,
@@ -28,16 +30,6 @@ else:
     logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("GenesysOpenAIBridge")
-
-# --- Custom Protocol to gracefully handle handshake errors ---
-class CustomWebSocketServerProtocol(WebSocketServerProtocol):
-    async def handshake(self, *args, **kwargs):
-        try:
-            return await super().handshake(*args, **kwargs)
-        except Exception as e:
-            logger.debug(f"Handshake error caught in custom protocol: {e}")
-            self.close()
-            raise
 
 async def validate_request(path, request_headers):
     """
@@ -230,6 +222,7 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
+Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)
@@ -242,9 +235,8 @@ Path: {GENESYS_PATH}
         async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
-            GENESYS_LISTEN_PORT,
+            int(GENESYS_LISTEN_PORT),
             process_request=validate_request,
-            create_protocol=CustomWebSocketServerProtocol,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
@@ -253,7 +245,6 @@ Path: {GENESYS_PATH}
                 f"Server is listening for Genesys AudioHook connections on "
                 f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH}"
             )
-
             try:
                 await asyncio.Future()  # run forever
             except asyncio.CancelledError:

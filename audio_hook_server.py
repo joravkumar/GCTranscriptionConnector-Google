@@ -32,7 +32,6 @@ class AudioHookServer:
         self.ws = websocket
         self.client_seq = 0
         self.server_seq = 0
-        self.openai_client = None  # Not used in transcription connector mode.
         self.running = True
         self.negotiated_media = None
         self.start_time = time.time()

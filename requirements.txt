@@ -1,4 +1,4 @@
-websockets
+websockets==15.0
 aiohttp
 pydub
 python-dotenv

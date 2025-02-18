@@ -47,6 +47,10 @@ async def validate_request(connection, request):
     before upgrading to a WebSocket.
     Signature verification is disabled; only the API key is required.
     """
+    # Added health endpoint support for Digital Ocean health checks
+    if request.path == "/health":
+        return connection.respond(http.HTTPStatus.OK, b"OK\n")
+    
     path_str = request.path
     raw_headers = dict(request.headers)
 
@@ -199,7 +203,6 @@ async def handle_genesys_connection(websocket):
         if session and hasattr(session, 'openai_client') and session.openai_client:
             await session.openai_client.close()
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
-
     except Exception as e:
         logger.error(f"[WS-{connection_id}] Fatal connection error: {e}", exc_info=True)
         if session is None:

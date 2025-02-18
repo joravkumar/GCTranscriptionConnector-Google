@@ -2,7 +2,6 @@ import asyncio
 import json
 import uuid
 import logging
-import websockets
 import http
 import os
 from datetime import datetime
@@ -31,7 +30,7 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import WebSocketServerProtocol
 
 class CustomWebSocketServerProtocol(WebSocketServerProtocol):
     async def handshake(self, *args, **kwargs):
@@ -41,34 +40,18 @@ class CustomWebSocketServerProtocol(WebSocketServerProtocol):
             logger.error(f"Handshake failed: {exc}", exc_info=True)
             raise
 
-async def validate_request(path, request_headers):
+async def validate_request(connection, request):
     """
     This function is called by websockets.serve() to validate the HTTP request
     before upgrading to a WebSocket.
     Signature verification is disabled; only the API key is required.
-    In newer versions of websockets, 'path' may not be a string. We attempt to
-    extract a proper path string from it if needed.
     """
-    if not isinstance(path, str):
-        if hasattr(path, "resource"):
-            path_str = path.resource
-        elif hasattr(path, "path"):
-            path_str = path.path
-        elif hasattr(path, "request") and hasattr(path.request, "path"):
-            path_str = path.request.path
-        else:
-            path_str = str(path)
-    else:
-        path_str = path
-
-    if hasattr(request_headers, "headers"):
-        raw_headers = dict(request_headers.headers)
-    else:
-        raw_headers = dict(request_headers)
+    path_str = request.path
+    raw_headers = dict(request.headers)
 
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
     logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
-    logger.info(f"[HTTP] Remote address: {raw_headers.get('Host', 'unknown')}")
+    logger.info(f"[HTTP] Remote address: {raw_headers.get('host', 'unknown')}")
 
     logger.info("[HTTP] Full headers received:")
     for name, value in raw_headers.items():
@@ -84,7 +67,7 @@ async def validate_request(path, request_headers):
         logger.error(f"[HTTP]   Expected: {GENESYS_PATH}")
         logger.error(f"[HTTP]   Normalized received: {normalized_path}")
         logger.error(f"[HTTP]   Normalized expected: {normalized_target}")
-        return (http.HTTPStatus.NOT_FOUND.value, [], b'Invalid path\n')
+        return connection.respond(http.HTTPStatus.NOT_FOUND, b'Invalid path\n')
 
     required_headers = [
         'audiohook-organization-id',
@@ -106,11 +89,11 @@ async def validate_request(path, request_headers):
 
     if header_keys.get('x-api-key') != GENESYS_API_KEY:
         logger.error("Invalid X-API-KEY header value.")
-        return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid API key\n")
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, b"Invalid API key\n")
 
     if header_keys.get('audiohook-organization-id') != GENESYS_ORG_ID:
         logger.error("Invalid Audiohook-Organization-Id header value.")
-        return (http.HTTPStatus.UNAUTHORIZED.value, [], b"Invalid Audiohook-Organization-Id\n")
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, b"Invalid Audiohook-Organization-Id\n")
 
     missing_headers = []
     found_headers = []
@@ -124,26 +107,26 @@ async def validate_request(path, request_headers):
         error_msg = f"Missing required headers: {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return (http.HTTPStatus.UNAUTHORIZED.value, [], error_msg.encode())
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, error_msg.encode())
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
     if upgrade_header != 'websocket':
         error_msg = f"Invalid upgrade header: {upgrade_header}"
         logger.error(f"[HTTP] {error_msg}")
-        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket upgrade required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket upgrade required\n')
 
     ws_version = header_keys.get('sec-websocket-version', '')
     logger.info(f"[HTTP] Checking WebSocket version: {ws_version}")
     if ws_version != '13':
         error_msg = f"Invalid WebSocket version: {ws_version}"
         logger.error(f"[HTTP] {error_msg}")
-        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket version 13 required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket version 13 required\n')
 
     ws_key = header_keys.get('sec-websocket-key')
     if not ws_key:
         logger.error("[HTTP] Missing WebSocket key")
-        return (http.HTTPStatus.BAD_REQUEST.value, [], b'WebSocket key required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket key required\n')
     logger.info("[HTTP] Found valid WebSocket key")
 
     ws_protocol = header_keys.get('sec-websocket-protocol', '')
@@ -173,7 +156,7 @@ async def handle_genesys_connection(websocket):
         logger.info(f"[WS-{connection_id}] Remote address: {websocket.remote_address}")
         logger.info(f"[WS-{connection_id}] Connection state: {websocket.state}")
 
-        ws_attributes = ['path', 'remote_address', 'local_address', 'state', 'open', 'protocol']
+        ws_attributes = ['path', 'remote_address', 'local_address', 'state', 'open', 'subprotocol']
         logger.info(f"[WS-{connection_id}] WebSocket object attributes:")
         for attr in ws_attributes:
             value = getattr(websocket, attr, "Not available")
@@ -204,11 +187,12 @@ async def handle_genesys_connection(websocket):
                         logger.error(f"[WS-{connection_id}] Error processing message: {ex}")
                         await session.disconnect_session("error", f"Message processing error: {ex}")
 
-            except websockets.ConnectionClosed as e:
-                logger.info(f"[WS-{connection_id}] Connection closed: code={e.code}, reason={e.reason}")
-                break
             except Exception as ex:
-                logger.error(f"[WS-{connection_id}] Unexpected error: {ex}", exc_info=True)
+                from websockets.exceptions import ConnectionClosed
+                if isinstance(ex, ConnectionClosed):
+                    logger.info(f"[WS-{connection_id}] Connection closed: code={ex.code}, reason={ex.reason}")
+                else:
+                    logger.error(f"[WS-{connection_id}] Unexpected error: {ex}", exc_info=True)
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
@@ -240,9 +224,9 @@ Path: {GENESYS_PATH}
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
-    # Monkey-patch the default protocol with our custom protocol.
-    import websockets.server
-    websockets.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
+    # Monkey-patch the default protocol in the asyncio server.
+    import websockets.asyncio.server
+    websockets.asyncio.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
 
     try:
         async with websockets.serve(

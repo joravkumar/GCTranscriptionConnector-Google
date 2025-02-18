@@ -49,8 +49,8 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # Buffer to accumulate the complete incoming PCMU audio stream.
-        self.audio_stream = bytearray()
+        # Removed accumulation of audio_stream for real-time transcription.
+        # self.audio_stream = bytearray()
 
         self.logger.info(f"New session started: {self.session_id}")        
 
@@ -248,46 +248,7 @@ class AudioHookServer:
     async def handle_close(self, msg: dict):
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
         
-        # Process the complete audio stream into a transcript via OpenAI translations API.
-        transcript_text = await translate_audio(bytes(self.audio_stream), self.negotiated_media, self.logger)
-        if transcript_text:
-            self.logger.info(f"Transcript obtained: {transcript_text}")
-            # Construct a transcript event message following the Transcript Entity Types.
-            transcript_event = {
-                "version": "2",
-                "type": "event",
-                "seq": self.server_seq + 1,
-                "clientseq": self.client_seq,
-                "id": self.session_id,
-                "parameters": {
-                    "entities": [
-                        {
-                            "type": "transcript",
-                            "data": {
-                                "id": str(uuid.uuid4()),
-                                "channelId": "external",
-                                "isFinal": True,
-                                "alternatives": [
-                                    {
-                                        "confidence": 1.0,
-                                        "interpretations": [
-                                            {
-                                                "type": "display",
-                                                "transcript": transcript_text
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            }
-            self.server_seq += 1
-            await self._send_json(transcript_event)
-        else:
-            self.logger.warning("No transcript generated from the audio stream.")
-
+        # Removed complete audio stream transcription since real-time transcription is in use.
         closed_msg = {
             "version": "2",
             "type": "closed",
@@ -344,8 +305,53 @@ class AudioHookServer:
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
-        # Accumulate the incoming PCMU audio data for transcription.
-        self.audio_stream.extend(frame_bytes)
+        # Process the audio chunk in real time for transcription.
+        asyncio.create_task(self.process_audio_chunk(frame_bytes))
+        # Optionally, keep audio_buffer if needed for debugging.
+        self.audio_buffer.append(frame_bytes)
+
+    async def process_audio_chunk(self, frame_bytes: bytes):
+        try:
+            self.logger.debug(f"Processing audio chunk for real-time transcription, chunk size: {len(frame_bytes)} bytes")
+            transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)
+            if transcript_text:
+                self.logger.info(f"Real-time transcript obtained: {transcript_text}")
+                transcript_event = {
+                    "version": "2",
+                    "type": "event",
+                    "seq": self.server_seq + 1,
+                    "clientseq": self.client_seq,
+                    "id": self.session_id,
+                    "parameters": {
+                        "entities": [
+                            {
+                                "type": "transcript",
+                                "data": {
+                                    "id": str(uuid.uuid4()),
+                                    "channelId": "external",
+                                    "isFinal": False,
+                                    "alternatives": [
+                                        {
+                                            "confidence": 1.0,
+                                            "interpretations": [
+                                                {
+                                                    "type": "display",
+                                                    "transcript": transcript_text
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+                self.server_seq += 1
+                await self._send_json(transcript_event)
+            else:
+                self.logger.warning("No transcript generated for this audio chunk")
+        except Exception as e:
+            self.logger.error(f"Error during real-time transcription processing: {e}", exc_info=True)
 
     async def _send_json(self, msg: dict):
         try:

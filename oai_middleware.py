@@ -31,6 +31,16 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
+from websockets.server import WebSocketServerProtocol
+
+class CustomWebSocketServerProtocol(WebSocketServerProtocol):
+    async def handshake(self, *args, **kwargs):
+        try:
+            return await super().handshake(*args, **kwargs)
+        except Exception as exc:
+            logger.error(f"Handshake failed: {exc}", exc_info=True)
+            raise
+
 async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
@@ -222,7 +232,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)
@@ -237,6 +246,7 @@ Log File: ./logging.txt  # Example
             GENESYS_LISTEN_HOST,
             int(GENESYS_LISTEN_PORT),
             process_request=validate_request,
+            create_protocol=CustomWebSocketServerProtocol,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None

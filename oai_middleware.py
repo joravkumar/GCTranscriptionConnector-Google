@@ -76,7 +76,8 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     signing_lines = []
     for header in header_list:
         if header == "@request-target":
-            line = f"@request-target: {method.lower()} {path}"
+            # Using uppercase HTTP method now per testing
+            line = f"@request-target: {method.upper()} {path}"
             signing_lines.append(line)
         elif header == "@authority":
             if "host" in headers:
@@ -111,7 +112,7 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     ).digest()
     computed_signature = base64.b64encode(computed_hmac).decode('utf-8')
 
-    # For deeper debugging, also log hex representations (masking sensitive parts is advised).
+    # For deeper debugging, also log hex representations.
     logger.debug(f"Computed HMAC (hex): {computed_hmac.hex()}")
     
     # Extract the provided signature.
@@ -348,7 +349,6 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
-Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)

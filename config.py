@@ -31,11 +31,6 @@ GENESYS_ORG_ID = os.getenv('GENESYS_ORG_ID')
 if not GENESYS_ORG_ID:
     raise ValueError("GENESYS_ORG_ID not found in environment variables.")
 
-# New environment variable for Genesys Client Secret.
-GENESYS_CLIENT_SECRET = os.getenv('GENESYS_CLIENT_SECRET')
-if not GENESYS_CLIENT_SECRET:
-    raise ValueError("GENESYS_CLIENT_SECRET not found in environment variables.")
-
 # Genesys rate limiting constants
 GENESYS_MSG_RATE_LIMIT = 5
 GENESYS_BINARY_RATE_LIMIT = 5

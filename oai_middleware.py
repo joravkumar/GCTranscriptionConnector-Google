@@ -37,21 +37,19 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     Verifies the signature using HMAC-SHA256.
     Expected signature header format: "sig1=:<base64 signature>:"
     Expected signature-input header format:
-      sig1=("@request-target" "@authority" "audiohook-organization-id" "audiohook-session-id"
-      "audiohook-correlation-id" "x-api-key");keyid="..."; nonce="...";alg="hmac-sha256";created=...;expires=...
+      sig1=("@request-target" "audiohook-session-id" "audiohook-organization-id" "audiohook-correlation-id" "x-api-key" "@authority");created=...;expires=...;keyid="...";nonce="...";alg="hmac-sha256"
     """
-
     logger.debug("Entering verify_signature...")
 
-    # Log the raw signature header, but mask most of it.
+    # Log the raw signature header, masking most of it.
     if len(signature_header) > 12:
-        logger.debug(f"Raw signature_header (partially masked): {signature_header[:12]}... (len={len(signature_header)})")
+        logger.debug(f"Raw signature_header (masked): {signature_header[:12]}... (len={len(signature_header)})")
     else:
         logger.debug(f"Raw signature_header: {signature_header}")
 
-    # Log the raw signature-input header, but mask it if long.
+    # Log the raw signature-input header, masking if long.
     if len(signature_input_header) > 50:
-        logger.debug(f"Raw signature_input_header (partially masked): {signature_input_header[:50]}...")
+        logger.debug(f"Raw signature_input_header (masked): {signature_input_header[:50]}...")
     else:
         logger.debug(f"Raw signature_input_header: {signature_input_header}")
 
@@ -95,19 +93,9 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
             signing_lines.append(line)
 
     signing_string = "\n".join(signing_lines)
+    logger.debug(f"Constructed signing string:\n{signing_string}")
 
-    # For debugging, show the signing string but mask the x-api-key if present:
-    masked_signing_string = signing_string
-    if "x-api-key:" in masked_signing_string:
-        # Attempt to mask only the value after 'x-api-key: '
-        masked_signing_string = masked_signing_string.replace(
-            f"x-api-key: {headers['x-api-key']}",
-            "x-api-key: ****"
-        )
-
-    logger.debug(f"Constructed signing string:\n{masked_signing_string}")
-
-    # Genesys docs: the client secret is base64-encoded, so decode it first.
+    # Decode the client secret from base64.
     try:
         decoded_secret = base64.b64decode(GENESYS_CLIENT_SECRET)
         logger.debug(f"Decoded client secret length: {len(decoded_secret)} bytes")
@@ -115,6 +103,7 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
         logger.error(f"Failed to base64-decode GENESYS_CLIENT_SECRET: {e}")
         return False
 
+    # Compute the HMAC signature.
     computed_hmac = hmac.new(
         decoded_secret,
         signing_string.encode('utf-8'),
@@ -122,18 +111,26 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
     ).digest()
     computed_signature = base64.b64encode(computed_hmac).decode('utf-8')
 
+    # For deeper debugging, also log hex representations (masking sensitive parts is advised).
+    logger.debug(f"Computed HMAC (hex): {computed_hmac.hex()}")
+    
     # Extract the provided signature.
     if not signature_header.startswith("sig1=:") or not signature_header.endswith(":"):
         logger.debug("Signature header format is invalid (missing 'sig1=:' prefix or ':' suffix).")
         return False
 
-    provided_signature = signature_header[len("sig1=:"):-1]
+    provided_signature_b64 = signature_header[len("sig1=:"):-1]
+    try:
+        provided_signature_bytes = base64.b64decode(provided_signature_b64)
+        logger.debug(f"Provided signature (hex): {provided_signature_bytes.hex()}")
+    except Exception as e:
+        logger.error(f"Failed to base64-decode provided signature: {e}")
+        return False
 
-    # Show partial logs for computed vs. provided signature
-    logger.debug(f"Computed signature (first 10 chars): {computed_signature[:10]}...")
-    logger.debug(f"Provided signature (first 10 chars): {provided_signature[:10]}...")
+    logger.debug(f"Computed signature (base64, first 10 chars): {computed_signature[:10]}...")
+    logger.debug(f"Provided signature (base64, first 10 chars): {provided_signature_b64[:10]}...")
 
-    is_match = hmac.compare_digest(computed_signature, provided_signature)
+    is_match = hmac.compare_digest(computed_signature, provided_signature_b64)
     logger.debug(f"Signature match result: {is_match}")
     return is_match
 
@@ -351,6 +348,7 @@ Starting up at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Host: {GENESYS_LISTEN_HOST}
 Port: {GENESYS_LISTEN_PORT}
 Path: {GENESYS_PATH}
+Log File: ./logging.txt  # Example
 {'='*80}
 """
     logger.info(startup_msg)

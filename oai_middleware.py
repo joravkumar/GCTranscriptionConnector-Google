@@ -30,7 +30,8 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
-from websockets.asyncio.server import WebSocketServerProtocol
+# Updated import: get the protocol from websockets.server (websockets 15.0)
+from websockets.server import WebSocketServerProtocol
 
 class CustomWebSocketServerProtocol(WebSocketServerProtocol):
     async def handshake(self, *args, **kwargs):
@@ -186,7 +187,6 @@ async def handle_genesys_connection(websocket):
                     except Exception as ex:
                         logger.error(f"[WS-{connection_id}] Error processing message: {ex}")
                         await session.disconnect_session("error", f"Message processing error: {ex}")
-
             except Exception as ex:
                 from websockets.exceptions import ConnectionClosed
                 if isinstance(ex, ConnectionClosed):
@@ -224,9 +224,9 @@ Path: {GENESYS_PATH}
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
-    # Monkey-patch the default protocol in the asyncio server.
-    import websockets.asyncio.server
-    websockets.asyncio.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
+    # Monkey-patch the default protocol in the server.
+    import websockets.server
+    websockets.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
 
     try:
         async with websockets.serve(

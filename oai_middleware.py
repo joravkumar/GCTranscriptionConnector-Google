@@ -90,11 +90,18 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 async def validate_request(path, request_headers):
     """
     This function is called by websockets.serve() to validate the HTTP request
-    before upgrading to a WebSocket. In newer versions of 'websockets', request_headers
-    is a 'Request' object, so we convert its 'headers' to a dictionary for easy lookups.
+    before upgrading to a WebSocket. However, newer versions of 'websockets'
+    may pass a non-string 'path' object. We convert it to a string here.
     """
-    # Convert the websockets Request object to a dictionary of headers.
-    # If it's already a dict-like object, this call won't break anything.
+    # Convert 'path' to a string if it's not already.
+    if not isinstance(path, str):
+        # Attempt to extract the path string if possible, else default to str(path).
+        possible_path_str = getattr(path, 'path', None)
+        path_str = possible_path_str if possible_path_str is not None else str(path)
+    else:
+        path_str = path
+
+    # Convert the request_headers to a dictionary if it's a Request object.
     if hasattr(request_headers, "headers"):
         raw_headers = dict(request_headers.headers)
     else:
@@ -111,7 +118,8 @@ async def validate_request(path, request_headers):
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    normalized_path = path.rstrip('/')
+    # Perform the path comparison.
+    normalized_path = path_str.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
 
     if normalized_path != normalized_target:
@@ -206,7 +214,7 @@ async def validate_request(path, request_headers):
         if 'signature' not in header_keys or 'signature-input' not in header_keys:
             logger.error("Missing signature headers despite client secret being configured.")
             return http.HTTPStatus.UNAUTHORIZED, [], b"Missing signature headers\n"
-        if not verify_signature(header_keys['signature'], header_keys['signature-input'], header_keys, "GET", path):
+        if not verify_signature(header_keys['signature'], header_keys['signature-input'], header_keys, "GET", path_str):
             logger.error("Invalid signature.")
             return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid signature\n"
 
@@ -254,15 +262,15 @@ async def handle_genesys_connection(websocket):
                     except json.JSONDecodeError as e:
                         logger.error(f"[WS-{connection_id}] Error parsing JSON: {e}")
                         await session.disconnect_session("error", f"JSON parse error: {e}")
-                    except Exception as e:
-                        logger.error(f"[WS-{connection_id}] Error processing message: {e}")
-                        await session.disconnect_session("error", f"Message processing error: {e}")
+                    except Exception as ex:
+                        logger.error(f"[WS-{connection_id}] Error processing message: {ex}")
+                        await session.disconnect_session("error", f"Message processing error: {ex}")
 
             except websockets.ConnectionClosed as e:
                 logger.info(f"[WS-{connection_id}] Connection closed: code={e.code}, reason={e.reason}")
                 break
-            except Exception as e:
-                logger.error(f"[WS-{connection_id}] Unexpected error: {e}", exc_info=True)
+            except Exception as ex:
+                logger.error(f"[WS-{connection_id}] Unexpected error: {ex}", exc_info=True)
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")

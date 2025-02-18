@@ -49,7 +49,7 @@ async def validate_request(connection, request):
     """
     # Added health endpoint support for Digital Ocean health checks
     if request.path == "/health":
-        return connection.respond(http.HTTPStatus.OK, b"OK\n")
+        return connection.respond(http.HTTPStatus.OK, "OK\n")
     
     path_str = request.path
     raw_headers = dict(request.headers)
@@ -72,7 +72,7 @@ async def validate_request(connection, request):
         logger.error(f"[HTTP]   Expected: {GENESYS_PATH}")
         logger.error(f"[HTTP]   Normalized received: {normalized_path}")
         logger.error(f"[HTTP]   Normalized expected: {normalized_target}")
-        return connection.respond(http.HTTPStatus.NOT_FOUND, b'Invalid path\n')
+        return connection.respond(http.HTTPStatus.NOT_FOUND, "Invalid path\n")
 
     required_headers = [
         'audiohook-organization-id',
@@ -94,11 +94,11 @@ async def validate_request(connection, request):
 
     if header_keys.get('x-api-key') != GENESYS_API_KEY:
         logger.error("Invalid X-API-KEY header value.")
-        return connection.respond(http.HTTPStatus.UNAUTHORIZED, b"Invalid API key\n")
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Invalid API key\n")
 
     if header_keys.get('audiohook-organization-id') != GENESYS_ORG_ID:
         logger.error("Invalid Audiohook-Organization-Id header value.")
-        return connection.respond(http.HTTPStatus.UNAUTHORIZED, b"Invalid Audiohook-Organization-Id\n")
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Invalid Audiohook-Organization-Id\n")
 
     missing_headers = []
     found_headers = []
@@ -112,26 +112,26 @@ async def validate_request(connection, request):
         error_msg = f"Missing required headers: {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return connection.respond(http.HTTPStatus.UNAUTHORIZED, error_msg.encode())
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, error_msg)
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
     if upgrade_header != 'websocket':
         error_msg = f"Invalid upgrade header: {upgrade_header}"
         logger.error(f"[HTTP] {error_msg}")
-        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket upgrade required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, "WebSocket upgrade required\n")
 
     ws_version = header_keys.get('sec-websocket-version', '')
     logger.info(f"[HTTP] Checking WebSocket version: {ws_version}")
     if ws_version != '13':
         error_msg = f"Invalid WebSocket version: {ws_version}"
         logger.error(f"[HTTP] {error_msg}")
-        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket version 13 required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, "WebSocket version 13 required\n")
 
     ws_key = header_keys.get('sec-websocket-key')
     if not ws_key:
         logger.error("[HTTP] Missing WebSocket key")
-        return connection.respond(http.HTTPStatus.BAD_REQUEST, b'WebSocket key required\n')
+        return connection.respond(http.HTTPStatus.BAD_REQUEST, "WebSocket key required\n")
     logger.info("[HTTP] Found valid WebSocket key")
 
     ws_protocol = header_keys.get('sec-websocket-protocol', '')

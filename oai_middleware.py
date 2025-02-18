@@ -6,13 +6,18 @@ import websockets
 import http
 import os
 from datetime import datetime
+import hmac
+import hashlib
+import base64
 
 from config import (
     GENESYS_LISTEN_HOST,
     GENESYS_LISTEN_PORT,
     GENESYS_PATH,
     DEBUG,
-    GENESYS_API_KEY  # New import for Genesys API key
+    GENESYS_API_KEY,
+    GENESYS_ORG_ID,
+    GENESYS_CLIENT_SECRET
 )
 from audio_hook_server import AudioHookServer
 from utils import format_json
@@ -26,6 +31,60 @@ else:
     logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("GenesysOpenAIBridge")
+
+
+def verify_signature(signature_header, signature_input_header, headers, method, path):
+    """
+    Verifies the signature using HMAC-SHA256.
+    Expected signature header format: "sig1=:<base64 signature>:"
+    Expected signature-input header format:
+      sig1=("@request-target" "@authority" "audiohook-organization-id" "audiohook-session-id"
+      "audiohook-correlation-id" "x-api-key");keyid="..."; nonce="...";alg="hmac-sha256";created=...;expires=...
+    """
+    try:
+        # Parse signature-input header to extract the list of headers.
+        if not signature_input_header.startswith("sig1="):
+            return False
+        sig_input = signature_input_header[len("sig1="):].strip()
+        if not (sig_input.startswith("(") and ")" in sig_input):
+            return False
+        end_paren_index = sig_input.find(")")
+        headers_part = sig_input[1:end_paren_index]
+        header_list = headers_part.split()
+        header_list = [h.strip('"') for h in header_list]
+    except Exception as e:
+        logger.error(f"Error parsing signature input: {e}")
+        return False
+
+    # Build the signing string according to the headers list.
+    signing_lines = []
+    for header in header_list:
+        if header == "@request-target":
+            signing_lines.append(f"@request-target: {method.lower()} {path}")
+        elif header == "@authority":
+            if "host" in headers:
+                signing_lines.append(f"@authority: {headers['host']}")
+            else:
+                return False
+        else:
+            if header.lower() not in headers:
+                return False
+            signing_lines.append(f"{header.lower()}: {headers[header.lower()]}")
+    signing_string = "\n".join(signing_lines)
+    
+    computed_hmac = hmac.new(
+        GENESYS_CLIENT_SECRET.encode('utf-8'),
+        signing_string.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    computed_signature = base64.b64encode(computed_hmac).decode('utf-8')
+
+    # Extract the provided signature.
+    if not signature_header.startswith("sig1=:") or not signature_header.endswith(":"):
+        return False
+    provided_signature = signature_header[len("sig1=:"):-1]
+
+    return hmac.compare_digest(computed_signature, provided_signature)
 
 
 async def validate_request(path, request_headers):
@@ -68,10 +127,15 @@ async def validate_request(path, request_headers):
         else:
             logger.info(f"[HTTP]   {k}: {v}")
 
-    # Verify that the X-API-KEY header matches our configured GENESYS_API_KEY
+    # Verify X-API-KEY header.
     if header_keys.get('x-api-key') != GENESYS_API_KEY:
         logger.error("Invalid X-API-KEY header value.")
         return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API key\n"
+
+    # Verify Audiohook-Organization-Id matches expected organization.
+    if header_keys.get('audiohook-organization-id') != GENESYS_ORG_ID:
+        logger.error("Invalid Audiohook-Organization-Id header value.")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid Audiohook-Organization-Id\n"
 
     missing_headers = []
     found_headers = []
@@ -117,6 +181,21 @@ async def validate_request(path, request_headers):
     logger.info(f"[HTTP] Connection header: {connection_header}")
     if 'upgrade' not in connection_header:
         logger.warning("[HTTP] Connection header doesn't contain 'upgrade'")
+
+    # Log optional signature headers if provided.
+    if 'signature' in header_keys:
+        logger.info("[HTTP] Received Signature header.")
+    if 'signature-input' in header_keys:
+        logger.info("[HTTP] Received Signature-Input header.")
+
+    # If a client secret is configured, verify that signature headers exist and are valid.
+    if GENESYS_CLIENT_SECRET:
+        if 'signature' not in header_keys or 'signature-input' not in header_keys:
+            logger.error("Missing signature headers despite client secret being configured.")
+            return http.HTTPStatus.UNAUTHORIZED, [], b"Missing signature headers\n"
+        if not verify_signature(header_keys['signature'], header_keys['signature-input'], header_keys, "GET", path):
+            logger.error("Invalid signature.")
+            return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid signature\n"
 
     logger.info("[HTTP] All validation checks passed successfully")
     logger.info(f"[HTTP] Proceeding with WebSocket upgrade")

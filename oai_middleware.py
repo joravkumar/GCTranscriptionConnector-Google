@@ -32,7 +32,6 @@ else:
 
 logger = logging.getLogger("GenesysOpenAIBridge")
 
-
 def verify_signature(signature_header, signature_input_header, headers, method, path):
     """
     Verifies the signature using HMAC-SHA256.
@@ -41,6 +40,7 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
       sig1=("@request-target" "@authority" "audiohook-organization-id" "audiohook-session-id"
       "audiohook-correlation-id" "x-api-key");keyid="..."; nonce="...";alg="hmac-sha256";created=...;expires=...
     """
+
     try:
         # Parse signature-input header to extract the list of headers.
         if not signature_input_header.startswith("sig1="):
@@ -73,8 +73,15 @@ def verify_signature(signature_header, signature_input_header, headers, method, 
 
     signing_string = "\n".join(signing_lines)
 
+    # Genesys docs: the client secret is base64-encoded, so decode it first.
+    try:
+        decoded_secret = base64.b64decode(GENESYS_CLIENT_SECRET)
+    except Exception as e:
+        logger.error(f"Failed to base64-decode GENESYS_CLIENT_SECRET: {e}")
+        return False
+
     computed_hmac = hmac.new(
-        GENESYS_CLIENT_SECRET.encode('utf-8'),
+        decoded_secret,
         signing_string.encode('utf-8'),
         hashlib.sha256
     ).digest()
@@ -102,8 +109,6 @@ async def validate_request(path, request_headers):
         elif hasattr(path, "path"):
             path_str = path.path
         elif hasattr(path, "request") and hasattr(path.request, "path"):
-            # Newer websockets often pass a ServerConnection object that
-            # has a 'request' attribute with a 'path' string.
             path_str = path.request.path
         else:
             path_str = str(path)
@@ -130,7 +135,6 @@ async def validate_request(path, request_headers):
     # Perform the path comparison.
     normalized_path = path_str.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
-
     if normalized_path != normalized_target:
         logger.error("[HTTP] Path mismatch:")
         logger.error(f"[HTTP]   Expected: {GENESYS_PATH}")

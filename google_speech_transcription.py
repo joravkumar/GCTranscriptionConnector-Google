@@ -34,7 +34,10 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
 
         # Convert the accumulated PCMU (u-law) data to PCM16.
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
-        logger.debug(f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, frame_rate=8000, channels={channels}")
+        logger.debug(
+            f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
+            f"frame_rate=8000, channels={channels}"
+        )
 
         # Define a synchronous transcription function.
         def transcribe():
@@ -44,9 +47,13 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
-            # Use auto_decoding_config so that the API automatically detects encoding and sample rate.
+            # Explicitly specify the decoding parameters for headerless PCM16 audio.
             config = cloud_speech.RecognitionConfig(
-                auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+                explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                    encoding=cloud_speech.ExplicitDecodingConfig.Encoding.LINEAR16,
+                    sample_rate_hertz=8000,
+                    audio_channel_count=channels,
+                ),
                 language_codes=["en-US"],
                 model=GOOGLE_SPEECH_MODEL,
             )

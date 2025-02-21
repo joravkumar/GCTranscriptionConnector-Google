@@ -3,4 +3,3 @@ aiohttp
 pydub
 python-dotenv
 openai==1.63.2
-gunicorn==23.0.0

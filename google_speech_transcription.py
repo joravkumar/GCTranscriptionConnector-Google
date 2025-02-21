@@ -12,7 +12,17 @@ from config import (
     GOOGLE_SPEECH_MODEL
 )
 
-# Load credentials from the centralized configuration.
+def normalize_language_code(lang: str) -> str:
+    """
+    Normalize language codes to the proper BCP-47 format (e.g. "es-es" -> "es-ES", "en-us" -> "en-US").
+    If the language code does not contain a hyphen, return it as is.
+    """
+    if '-' in lang:
+        parts = lang.split('-')
+        if len(parts) == 2:
+            return f"{parts[0].lower()}-{parts[1].upper()}"
+    return lang
+
 try:
     credentials_info = json.loads(GOOGLE_APPLICATION_CREDENTIALS)
     _credentials = service_account.Credentials.from_service_account_info(credentials_info)
@@ -32,14 +42,20 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             if channels == 0:
                 channels = 1
 
-        # Convert the accumulated PCMU (u-law) data to PCM16.
+        # Convert the incoming PCMU (u-law) data to PCM16.
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
         logger.debug(
             f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
             f"frame_rate=8000, channels={channels}"
         )
 
-        # Define a synchronous transcription function.
+        # Extract the source language from negotiated_media if provided; default to "en-US".
+        source_language_raw = "en-US"
+        if negotiated_media and "language" in negotiated_media:
+            source_language_raw = negotiated_media["language"]
+        source_language = normalize_language_code(source_language_raw)
+        logger.debug(f"Source language determined as: {source_language}")
+
         def transcribe():
             if not GOOGLE_CLOUD_PROJECT:
                 raise ValueError("GOOGLE_CLOUD_PROJECT not configured.")
@@ -47,17 +63,22 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
-            # Use explicit_decoding_config to explicitly specify the decoding parameters.
-            # Since the v2 API no longer exposes an enum for AudioEncoding, we use 1 (LINEAR16).
+            # Build the explicit decoding configuration.
+            # Since v2 no longer exposes an AudioEncoding enum, we use 1 (which corresponds to LINEAR16).
+            explicit_config = cloud_speech.ExplicitDecodingConfig(
+                encoding=1,  # LINEAR16
+                sample_rate_hertz=8000,
+                audio_channel_count=channels,
+            )
+            # Build the recognition configuration.
             config = cloud_speech.RecognitionConfig(
-                explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
-                    encoding=1,  # LINEAR16 as an integer value
-                    sample_rate_hertz=8000,
-                    audio_channel_count=channels,
-                ),
-                language_codes=["en-US"],
+                explicit_decoding_config=explicit_config,
+                language_codes=[source_language],
                 model=GOOGLE_SPEECH_MODEL,
             )
+            # If the source language is not English, add translation_config so that the transcript is translated to en-US.
+            if source_language.lower() != "en-us":
+                config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
             request = cloud_speech.RecognizeRequest(
                 recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
                 config=config,

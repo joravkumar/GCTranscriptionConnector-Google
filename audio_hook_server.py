@@ -20,7 +20,7 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from openai_translation import translate_audio
+from google_speech_transcription import translate_audio  # Updated import: removed OpenAI
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -49,13 +49,7 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # New variables for accumulating and flushing audio for transcription.
-        self.audio_accumulator = bytearray()
-        self.audio_lock = asyncio.Lock()
-        self._flush_task = None
-        self.last_transcript_sent_time = 0
-
-        self.logger.info(f"New session started: {self.session_id}")
+        self.logger.info(f"New session started: {self.session_id}")        
 
     async def handle_error(self, msg: dict):
         error_code = msg["parameters"].get("code")
@@ -251,7 +245,6 @@ class AudioHookServer:
     async def handle_close(self, msg: dict):
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
         
-        # Removed complete audio stream transcription since real-time transcription is in use.
         closed_msg = {
             "version": "2",
             "type": "closed",
@@ -314,42 +307,9 @@ class AudioHookServer:
         self.audio_buffer.append(frame_bytes)
 
     async def process_audio_chunk(self, frame_bytes: bytes):
-        # Accumulate audio frames until reaching a minimum duration threshold.
-        MIN_ULAW_BYTES = 800  # Minimum required u-law bytes for 0.1 seconds at 8000 Hz.
-        async with self.audio_lock:
-            if not hasattr(self, 'audio_accumulator'):
-                self.audio_accumulator = bytearray()
-            self.audio_accumulator.extend(frame_bytes)
-            self.last_frame_time = time.time()
-            if len(self.audio_accumulator) >= MIN_ULAW_BYTES:
-                data_to_process = bytes(self.audio_accumulator)
-                self.audio_accumulator.clear()
-            else:
-                # Schedule a flush if no more data arrives shortly.
-                if not self._flush_task or self._flush_task.done():
-                    self._flush_task = asyncio.create_task(self.flush_audio_buffer_after_delay())
-                return
-        await self._process_accumulated_audio(data_to_process)
-
-    async def flush_audio_buffer_after_delay(self):
-        # Wait briefly to allow additional frames to accumulate.
-        await asyncio.sleep(0.2)
-        MIN_ULAW_BYTES = 800
-        async with self.audio_lock:
-            if len(self.audio_accumulator) > 0:
-                if len(self.audio_accumulator) < MIN_ULAW_BYTES:
-                    pad_length = MIN_ULAW_BYTES - len(self.audio_accumulator)
-                    self.audio_accumulator.extend(b'\xff' * pad_length)
-                data_to_process = bytes(self.audio_accumulator)
-                self.audio_accumulator.clear()
-            else:
-                return
-        await self._process_accumulated_audio(data_to_process)
-
-    async def _process_accumulated_audio(self, audio_data: bytes):
         try:
-            self.logger.debug(f"Processing accumulated audio chunk for real-time transcription, total size: {len(audio_data)} bytes")
-            transcript_text = await translate_audio(audio_data, self.negotiated_media, self.logger)
+            self.logger.debug(f"Processing audio chunk for real-time transcription, chunk size: {len(frame_bytes)} bytes")
+            transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)
             if transcript_text:
                 self.logger.info(f"Real-time transcript obtained: {transcript_text}")
                 transcript_event = {
@@ -383,33 +343,22 @@ class AudioHookServer:
                     }
                 }
                 self.server_seq += 1
-
-                # Throttle sending transcript events to comply with rate limits.
-                current_time = time.time()
-                elapsed = current_time - getattr(self, 'last_transcript_sent_time', 0)
-                if elapsed < 0.2:
-                    await asyncio.sleep(0.2 - elapsed)
-                self.last_transcript_sent_time = time.time()
-
                 await self._send_json(transcript_event)
             else:
-                self.logger.warning("No transcript generated for the accumulated audio chunk")
+                self.logger.warning("No transcript generated for this audio chunk")
         except Exception as e:
             self.logger.error(f"Error during real-time transcription processing: {e}", exc_info=True)
 
     async def _send_json(self, msg: dict):
         try:
-            if msg.get("type") == "event":
-                while not await self.message_limiter.acquire():
-                    await asyncio.sleep(0.05)
-            else:
-                if not await self.message_limiter.acquire():
-                    current_rate = self.message_limiter.get_current_rate()
-                    self.logger.warning(
-                        f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
-                        f"Message type: {msg.get('type')}. Dropping to maintain compliance."
-                    )
-                    return
+            if not await self.message_limiter.acquire():
+                current_rate = self.message_limiter.get_current_rate()
+                self.logger.warning(
+                    f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
+                    f"Message type: {msg.get('type')}. Dropping to maintain compliance."
+                )
+                return
+
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
         except ConnectionClosed:

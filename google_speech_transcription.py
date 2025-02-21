@@ -12,9 +12,6 @@ from config import (
     GOOGLE_SPEECH_MODEL
 )
 
-# Define a minimum RMS energy threshold (tunable) for processing audio.
-MIN_RMS_THRESHOLD = 500
-
 def normalize_language_code(lang: str) -> str:
     """
     Normalize language codes to the proper BCP-47 format (e.g. "es-es" -> "es-ES", "en-us" -> "en-US").
@@ -34,7 +31,7 @@ except Exception as e:
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
     if not audio_stream:
-        logger.warning("google_speech_transcription - No audio data received for transcription.")
+        logger.warning(f"google_speech_transcription - No audio data received for transcription.")
         return ""
     try:
         logger.debug(f"google_speech_transcription - Translating audio chunk of length {len(audio_stream)} bytes")
@@ -51,13 +48,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             f"google_speech_transcription - Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
             f"frame_rate=8000, channels={channels}"
         )
-        
-        # Compute RMS energy and filter out low-energy (likely catch-up) frames.
-        energy = audioop.rms(pcm16_data, 2)
-        logger.debug(f"google_speech_transcription - Computed RMS energy: {energy}")
-        if energy < MIN_RMS_THRESHOLD:
-            logger.debug(f"google_speech_transcription - Audio energy {energy} is below threshold {MIN_RMS_THRESHOLD}, skipping transcription.")
-            return ""
 
         # Extract the source language from negotiated_media if provided; default to "en-US".
         source_language_raw = "en-US"
@@ -79,7 +69,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 sample_rate_hertz=8000,
                 audio_channel_count=channels,
             )
-            # Build the recognition configuration.
+            # Build the recognition configuration
             config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=explicit_config,
                 language_codes=[source_language],

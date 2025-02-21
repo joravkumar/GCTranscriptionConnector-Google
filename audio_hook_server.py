@@ -20,7 +20,7 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import translate_audio
+from google_speech_transcription import translate_audio, normalize_language_code
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -319,6 +319,13 @@ class AudioHookServer:
             offset = self.total_samples / 8000.0  # cumulative offset in seconds
             self.total_samples += samples
 
+            # Determine the source language from negotiated media.
+            if self.negotiated_media and "language" in self.negotiated_media:
+                source_language = normalize_language_code(self.negotiated_media["language"])
+            else:
+                source_language = "en-US"
+            self.logger.debug(f"Source language for transcription: {source_language}")
+
             transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)
             if transcript_text:
                 self.logger.info(f"Real-time transcript obtained: {transcript_text}")
@@ -335,7 +342,8 @@ class AudioHookServer:
                             "value": word,
                             "confidence": 1.0,
                             "offset": f"PT{token_offset:.2f}S",
-                            "duration": f"PT{token_duration:.2f}S"
+                            "duration": f"PT{token_duration:.2f}S",
+                            "language": source_language
                         })
                         token_offset += token_duration
 
@@ -352,12 +360,13 @@ class AudioHookServer:
                                 "data": {
                                     "id": str(uuid.uuid4()),
                                     "channelId": 0,
-                                    "isFinal": False,
+                                    "isFinal": True,
                                     "offset": f"PT{offset:.2f}S",
                                     "duration": f"PT{chunk_duration:.2f}S",
                                     "alternatives": [
                                         {
                                             "confidence": 1.0,
+                                            "languages": [source_language],
                                             "interpretations": [
                                                 {
                                                     "type": "display",

@@ -44,9 +44,9 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
+            # Use auto_decoding_config so that the API automatically detects encoding and sample rate.
             config = cloud_speech.RecognitionConfig(
-                encoding=cloud_speech.RecognitionConfig.Encoding.LINEAR16,
-                sample_rate_hertz=8000,
+                auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
                 language_codes=["en-US"],
                 model=GOOGLE_SPEECH_MODEL,
             )

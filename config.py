@@ -18,6 +18,12 @@ GOOGLE_CLOUD_PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT')
 if not GOOGLE_CLOUD_PROJECT:
     raise ValueError("GOOGLE_CLOUD_PROJECT not found in environment variables.")
 
+# Centralized service account credentials JSON key.
+# This environment variable should contain the entire JSON key as a string.
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+if not GOOGLE_APPLICATION_CREDENTIALS:
+    raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not found in environment variables.")
+
 # New environment variable for Genesys API key.
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:

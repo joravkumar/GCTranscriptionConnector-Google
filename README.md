@@ -96,6 +96,7 @@ The application is built around the following core components:
   Ensures that the system package `ffmpeg` is installed on DigitalOcean's App Platform to support audio conversion:
   ```
   ffmpeg
+  libvpx7
   ```
 
 ---
@@ -216,15 +217,3 @@ All configurable parameters are defined in `config.py`. This includes:
 - Server listening host, port, and path.
 
 ---
-
-## References
-
-- [Genesys AudioHook Documentation](https://developer.genesys.cloud)
-- [OpenAI API Documentation](https://beta.openai.com/docs/api-reference/audio)
-- [DigitalOcean App Platform Aptfile Buildpack](https://www.digitalocean.com/docs/app-platform/how-to/add-aptfile/)
-
----
-
-## License
-
-This project is released under the [MIT License](LICENSE).

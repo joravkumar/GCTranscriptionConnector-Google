@@ -20,7 +20,7 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import translate_audio, normalize_language_code
+from google_speech_transcription import translate_audio
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -169,7 +169,7 @@ class AudioHookServer:
 
         # Capture conversation language from the open message parameters.
         if "language" in msg["parameters"]:
-            self.conversation_language = normalize_language_code(msg["parameters"]["language"])
+            self.conversation_language = msg["parameters"]["language"]
         else:
             self.conversation_language = "en-US"
 
@@ -221,6 +221,11 @@ class AudioHookServer:
             await self._send_json(resp)
             self.running = False
             return
+
+        # If the chosen media does not already have a language property,
+        # set it using the conversation language.
+        if "language" not in chosen:
+            chosen["language"] = self.conversation_language
 
         self.negotiated_media = chosen
 
@@ -328,8 +333,10 @@ class AudioHookServer:
             offset = self.total_samples / 8000.0  # cumulative offset in seconds
             self.total_samples += samples
 
-            # Use the conversation language stored during the open message.
-            source_language = self.conversation_language
+            # Use the language from negotiated_media (which was set from the open message)
+            source_language = "en-US"
+            if self.negotiated_media and "language" in self.negotiated_media:
+                source_language = self.negotiated_media["language"]
             self.logger.debug(f"Source language for transcription: {source_language}")
 
             transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)

@@ -1,8 +1,23 @@
 import asyncio
 import audioop
+import os
+import json
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
+from google.oauth2 import service_account
 from google.api_core.client_options import ClientOptions
+
+# Load credentials from the GOOGLE_APPLICATION_CREDENTIALS environment variable,
+# which is expected to contain the JSON key itself.
+try:
+    credentials_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if credentials_json:
+        credentials_info = json.loads(credentials_json)
+        _credentials = service_account.Credentials.from_service_account_info(credentials_info)
+    else:
+        _credentials = None
+except Exception as e:
+    _credentials = None
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
     if not audio_stream:
@@ -23,11 +38,13 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
 
         # Define a synchronous transcription function.
         def transcribe():
-            # Import project ID from config
             from config import GOOGLE_CLOUD_PROJECT
             if not GOOGLE_CLOUD_PROJECT:
                 raise ValueError("GOOGLE_CLOUD_PROJECT not configured.")
-            client = SpeechClient(client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com"))
+            client = SpeechClient(
+                credentials=_credentials,
+                client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
+            )
             config = cloud_speech.RecognitionConfig(
                 encoding=cloud_speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=8000,

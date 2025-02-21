@@ -1,4 +1,3 @@
-
 import asyncio
 import audioop
 import os
@@ -32,10 +31,10 @@ except Exception as e:
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
     if not audio_stream:
-        logger.warning("No audio data received for transcription.")
+        logger.warning(f"google_speech_transcription - No audio data received for transcription.")
         return ""
     try:
-        logger.debug(f"Translating audio chunk of length {len(audio_stream)} bytes")
+        logger.debug(f"google_speech_transcription - Translating audio chunk of length {len(audio_stream)} bytes")
         # Determine number of channels from negotiated media; default to 1.
         channels = 1
         if negotiated_media and "channels" in negotiated_media:
@@ -46,7 +45,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         # Convert the incoming PCMU (u-law) data to PCM16.
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
         logger.debug(
-            f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
+            f"google_speech_transcription - Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
             f"frame_rate=8000, channels={channels}"
         )
 
@@ -55,7 +54,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         if negotiated_media and "language" in negotiated_media:
             source_language_raw = negotiated_media["language"]
         source_language = normalize_language_code(source_language_raw)
-        logger.debug(f"Source language determined as: {source_language}")
+        logger.debug(f"google_speech_transcription - Source language determined as: {source_language}")
 
         def transcribe():
             if not GOOGLE_CLOUD_PROJECT:
@@ -95,8 +94,8 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             return " ".join(transcripts)
 
         transcript = await asyncio.to_thread(transcribe)
-        logger.debug(f"Received transcript: {transcript}")
+        logger.debug(f"google_speech_transcription - Received transcript: {transcript}")
         return transcript
     except Exception as e:
-        logger.error(f"Error during transcription: {e}", exc_info=True)
+        logger.error(f"google_speech_transcription - Error during transcription: {e}", exc_info=True)
         return ""

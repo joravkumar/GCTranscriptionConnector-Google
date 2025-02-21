@@ -1,33 +1,26 @@
-# Use an official Python 3.12 slim image as the base.
-FROM python:3.12-slim
-
-# Install ffmpeg and its dependencies.
-# The list below installs ffmpeg and the required libraries.
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    libvpx7 \
-    pulseaudio \
-    libmp3lame0 \
-    libpulse0 \
-    libpulse-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set the working directory inside the container.
+# Stage 1: Build Stage
+FROM python:3.12.8-slim as builder
 WORKDIR /app
 
-# (Optional) If you want to ensure Python output is not buffered:
-ENV PYTHONUNBUFFERED=1
-
-# Copy requirements.txt first to leverage Docker caching.
+# Copy requirements and install them (gunicorn should be in requirements.txt)
 COPY requirements.txt .
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies.
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of your application code.
+# Copy the rest of the application code
 COPY . .
 
-# (Optional) If your app uses Gunicorn, and as the DO article explains,
-# you must specify a temporary directory for Gunicorn workers.
-# Replace "project.wsgi" with your actual WSGI module.
+# Stage 2: Final Image
+FROM python:3.12.8-slim
+WORKDIR /app
+
+# Copy installed packages from the builder stage
+COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
+COPY --from=builder /usr/local/bin/ /usr/local/bin/
+COPY . .
+
+# (Optional) Set environment variables for your app, if needed
+ENV PATH="/usr/local/bin:${PATH}"
+
+# Set the command to run gunicorn, adjust "project.wsgi" to your actual WSGI module
 CMD ["gunicorn", "--worker-tmp-dir", "/dev/shm", "project.wsgi"]

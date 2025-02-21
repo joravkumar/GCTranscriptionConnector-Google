@@ -30,6 +30,15 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             frame_rate=8000,
             channels=channels
         )
+        # Ensure audio segment meets minimum duration requirement of 0.1 seconds (100 ms)
+        if audio_segment.duration_seconds < 0.1:
+            min_duration_ms = 100
+            current_duration_ms = int(audio_segment.duration_seconds * 1000)
+            if current_duration_ms < min_duration_ms:
+                pad_duration_ms = min_duration_ms - current_duration_ms
+                silence_segment = AudioSegment.silent(duration=pad_duration_ms, frame_rate=audio_segment.frame_rate)
+                audio_segment = audio_segment + silence_segment
+                logger.debug(f"Padded audio segment with {pad_duration_ms}ms of silence to meet minimum duration")
         # Export the audio segment to an MP3 file.
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
             temp_filename = temp_mp3.name

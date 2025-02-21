@@ -1,26 +1,44 @@
-# Stage 1: Build Stage
-FROM python:3.12.8-slim as builder
-WORKDIR /app
-
-# Copy requirements and install them (gunicorn should be in requirements.txt)
-COPY requirements.txt .
-RUN pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application code
-COPY . .
-
-# Stage 2: Final Image
+# -------------------------------------------------
+# 1) Use a suitable Python base image
+# -------------------------------------------------
 FROM python:3.12.8-slim
+
+# -------------------------------------------------
+# 2) Install system packages needed for FFmpeg, etc.
+#    (since you used to rely on Aptfile)
+# -------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libvpx7 \
+    pulseaudio \
+    libmp3lame0 \
+    libpulse0 \
+    libpulse-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# -------------------------------------------------
+# 3) Create a working directory
+# -------------------------------------------------
 WORKDIR /app
 
-# Copy installed packages from the builder stage
-COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
-COPY --from=builder /usr/local/bin/ /usr/local/bin/
+# -------------------------------------------------
+# 4) Copy and install Python dependencies
+# -------------------------------------------------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# -------------------------------------------------
+# 5) Copy your entire codebase into the container
+# -------------------------------------------------
 COPY . .
 
-# (Optional) Set environment variables for your app, if needed
-ENV PATH="/usr/local/bin:${PATH}"
+# -------------------------------------------------
+# 6) Expose the port you actually listen on
+#    (Your code listens on GENESYS_LISTEN_PORT=443, so we EXPOSE 443)
+# -------------------------------------------------
+EXPOSE 443
 
-# Set the command to run gunicorn, adjust "project.wsgi" to your actual WSGI module
-CMD ["gunicorn", "--worker-tmp-dir", "/dev/shm", "project.wsgi"]
+# -------------------------------------------------
+# 7) Finally, run your main Python script
+# -------------------------------------------------
+CMD ["python", "oai_middleware.py"]

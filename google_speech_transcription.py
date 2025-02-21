@@ -47,10 +47,10 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
-            # Explicitly specify the decoding parameters for headerless PCM16 audio.
+            # Use explicit_decoding_config to specify the parameters for headerless PCM16 audio.
             config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
-                    encoding=cloud_speech.ExplicitDecodingConfig.Encoding.LINEAR16,
+                    encoding=cloud_speech.AudioEncoding.LINEAR16,
                     sample_rate_hertz=8000,
                     audio_channel_count=channels,
                 ),

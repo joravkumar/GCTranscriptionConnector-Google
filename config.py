@@ -13,13 +13,10 @@ GENESYS_LISTEN_HOST = "0.0.0.0"
 GENESYS_LISTEN_PORT = "443"
 GENESYS_PATH = "/audiohook"
 
-# OpenAI Translation API settings
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables.")
-
-# New environment variable for the transcription model.
-OPENAI_TRANSCRIPTION_MODEL = os.getenv('OPENAI_TRANSCRIPTION_MODEL', 'whisper-1')
+# Google Cloud Speech-to-Text API settings
+GOOGLE_CLOUD_PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT')
+if not GOOGLE_CLOUD_PROJECT:
+    raise ValueError("GOOGLE_CLOUD_PROJECT not found in environment variables.")
 
 # New environment variable for Genesys API key.
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')

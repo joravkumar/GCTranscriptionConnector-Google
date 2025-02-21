@@ -2,11 +2,10 @@ import tempfile
 import os
 import audioop
 from pydub import AudioSegment
-import openai
+from openai import AsyncOpenAI
 from config import OPENAI_API_KEY, OPENAI_TRANSCRIPTION_MODEL
 
-# Set the API key for the OpenAI SDK.
-openai.api_key = OPENAI_API_KEY
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
     if not audio_stream:
@@ -39,7 +38,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
 
         # Open the MP3 file and use the OpenAI SDK to create a translation.
         with open(temp_filename, "rb") as audio_file:
-            transcript_response = openai.Audio.translations.create(
+            transcript_response = await client.audio.translations.create(
                 model=OPENAI_TRANSCRIPTION_MODEL,
                 file=audio_file,
                 response_format="json",
@@ -47,7 +46,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             )
         # Clean up the temporary file.
         os.remove(temp_filename)
-        transcript = transcript_response.get("text", "")
+        transcript = transcript_response.text if hasattr(transcript_response, "text") else transcript_response.get("text", "")
         logger.debug(f"Received transcript: {transcript}")
         return transcript
     except Exception as e:

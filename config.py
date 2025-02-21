@@ -24,6 +24,10 @@ GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
 if not GOOGLE_APPLICATION_CREDENTIALS:
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not found in environment variables.")
 
+# New environment variable to set the speech recognition model.
+# Defaults to "chirp_2" if not provided.
+GOOGLE_SPEECH_MODEL = os.getenv('GOOGLE_SPEECH_MODEL', 'chirp_2')
+
 # New environment variable for Genesys API key.
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:

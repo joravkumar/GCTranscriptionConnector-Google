@@ -45,7 +45,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
             config = cloud_speech.RecognitionConfig(
-                encoding=cloud_speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                encoding=cloud_speech.RecognitionConfig.Encoding.LINEAR16,
                 sample_rate_hertz=8000,
                 language_codes=["en-US"],
                 model=GOOGLE_SPEECH_MODEL,

@@ -3,6 +3,7 @@ import audioop
 import os
 import json
 import hashlib
+import time
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.oauth2 import service_account
@@ -32,7 +33,7 @@ except Exception as e:
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
     if not audio_stream:
-        logger.warning(f"google_speech_transcription - No audio data received for transcription.")
+        logger.warning("google_speech_transcription - No audio data received for transcription.")
         return ""
     try:
         logger.debug(f"google_speech_transcription - Translating audio chunk of length {len(audio_stream)} bytes")
@@ -95,11 +96,16 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 config=config,
                 content=pcm16_data,
             )
+            start_time = time.time()
             response = client.recognize(request=request)
+            duration = time.time() - start_time
+            logger.debug(f"google_speech_transcription - Recognition API call took {duration:.3f} seconds")
             transcripts = []
             for result in response.results:
                 if result.alternatives:
                     transcripts.append(result.alternatives[0].transcript)
+            if not transcripts:
+                logger.warning("google_speech_transcription - No transcript alternatives returned from recognition API")
             return " ".join(transcripts)
 
         transcript = await asyncio.to_thread(transcribe)

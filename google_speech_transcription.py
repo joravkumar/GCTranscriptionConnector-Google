@@ -6,7 +6,11 @@ from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.oauth2 import service_account
 from google.api_core.client_options import ClientOptions
-from config import GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT
+from config import (
+    GOOGLE_APPLICATION_CREDENTIALS,
+    GOOGLE_CLOUD_PROJECT,
+    GOOGLE_SPEECH_MODEL
+)
 
 # Load credentials from the centralized configuration.
 try:
@@ -44,7 +48,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 encoding=cloud_speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=8000,
                 language_codes=["en-US"],
-                model="chirp_2",
+                model=GOOGLE_SPEECH_MODEL,
             )
             request = cloud_speech.RecognizeRequest(
                 recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",

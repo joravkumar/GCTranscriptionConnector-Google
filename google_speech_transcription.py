@@ -2,6 +2,7 @@ import asyncio
 import audioop
 import os
 import json
+import hashlib
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.oauth2 import service_account
@@ -48,6 +49,13 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             f"google_speech_transcription - Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, "
             f"frame_rate=8000, channels={channels}"
         )
+        # Compute RMS value for debugging to assess audio energy.
+        rms_value = audioop.rms(pcm16_data, 2)
+        logger.debug(f"google_speech_transcription - PCM16 RMS value: {rms_value}")
+
+        # Compute MD5 hash of PCM16 data for correlation.
+        hash_digest = hashlib.md5(pcm16_data).hexdigest()
+        logger.debug(f"google_speech_transcription - PCM16 data MD5: {hash_digest}")
 
         # Extract the source language from negotiated_media if provided; default to "en-US".
         source_language_raw = "en-US"
@@ -81,6 +89,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":
                 config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
+            logger.debug(f"google_speech_transcription - Sending recognition request with sample_rate=8000, channels={channels}, language={source_language}, model={GOOGLE_SPEECH_MODEL}")
             request = cloud_speech.RecognizeRequest(
                 recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
                 config=config,

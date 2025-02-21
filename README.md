@@ -16,7 +16,6 @@ This repository contains a production-ready implementation of a Genesys AudioHoo
 - [Usage](#usage)
 - [Error Handling and Logging](#error-handling-and-logging)
 - [Configuration](#configuration)
-
 ---
 
 ## Overview
@@ -90,13 +89,6 @@ The application is built around the following core components:
 - **utils.py**  
   Contains helper functions such as `format_json` (for pretty-printing JSON) and `parse_iso8601_duration` (to handle duration strings).
 
-- **Aptfile**  
-  Ensures that the system packages `libvpx7` and `ffmpeg` is installed on DigitalOcean's App Platform to support audio conversion:
-  ```
-  ffmpeg
-  libvpx7
-  ```
-
 ---
 
 ## Transcription Processing and Injection
@@ -119,7 +111,7 @@ The application is built around the following core components:
    Upon receiving the transcript, the server builds a "transcript" event message:
    - The message is structured per Genesys Cloud specifications.
    - It includes a unique transcript ID, a channel identifier (typically `external`), a flag indicating whether the transcript is final (in this implementation, it is marked as interim with `isFinal: False`), and the transcript text in the `alternatives` field.
-   - The event message is then sent to Genesys Cloud using the `_send_json` method, thereby injecting the transcription back into the Genesys Cloud conversation. Genesys Cloud can then use the transcription for features like speech and text analytics or native agent assist.
+   - The event message is then sent to Genesys Cloud using the `_send_json` method, thereby injecting the transcription back into the Genesys Cloud conversation. Genesys Cloud can then use the transcription for features like speech and text analytics or other WEM features.
 
 ---
 
@@ -138,11 +130,35 @@ Since the OpenAI Translation API currently supports only English, the following 
 
 ## Deployment
 
-This project is designed to run on DigitalOcean App Platform or similar PaaS offerings. Key deployment details include:
+This project is specifically designed to be deployed on DigitalOcean as an App Platform service. The deployment can be done using either the provided Dockerfile (recommended) or through buildpacks.
 
-- **Buildpacks and System Packages:**  
-  - An **Aptfile** is provided to install FFmpeg.
-  - The Python buildpack (or a Dockerfile if you choose that path) handles application dependencies using `requirements.txt`.
+### Dockerfile Deployment
+
+The repository includes a production-ready Dockerfile.
+
+### Digital Ocean App Platform Configuration
+
+To use the Dockerfile deployment method in Digital Ocean App Platform, you need to modify the App Spec configuration:
+
+1. Go to App Settings > App Spec > edit
+2. Locate the `services` section
+3. Replace:
+   ```yaml
+   services:
+     - environment_slug: python
+   ```
+   With:
+   ```yaml
+   services:
+     - dockerfile_path: Dockerfile
+   ```
+4. Leave the rest of the file unaltered
+
+This configuration tells Digital Ocean App Platform to use your Dockerfile for building and deploying the application instead of using the default Python buildpack.
+
+### Alternative Buildpack Deployment
+
+If you prefer using buildpacks instead of Docker:
 
 - **Environment Variables:**  
   The following environment variables must be configured in your deployment environment:
@@ -174,10 +190,6 @@ This project is designed to run on DigitalOcean App Platform or similar PaaS off
   - `pydub`
   - `python-dotenv`
   - `openai==1.63.2`
-
-- **System Package:**  
-  - **FFmpeg:** Installed automatically via the Aptfile.
-  - **libvpx7:** Installed automatically via the Aptfile.
 
 ---
 

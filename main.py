@@ -28,7 +28,7 @@ if DEBUG == 'true':
 else:
     logging.basicConfig(level=logging.INFO)
 
-logger = logging.getLogger("GenesysOpenAIBridge")
+logger = logging.getLogger("GenesysGoogleBridge")
 
 # Updated import: get the protocol from websockets.server (websockets 15.0)
 from websockets.server import WebSocketServerProtocol

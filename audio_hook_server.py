@@ -20,7 +20,7 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import translate_audio  # Updated import: removed OpenAI
+from google_speech_transcription import translate_audio
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -48,6 +48,9 @@ class AudioHookServer:
 
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
+
+        # New: total samples processed for offset calculation.
+        self.total_samples = 0
 
         self.logger.info(f"New session started: {self.session_id}")        
 
@@ -309,9 +312,33 @@ class AudioHookServer:
     async def process_audio_chunk(self, frame_bytes: bytes):
         try:
             self.logger.debug(f"Processing audio chunk for real-time transcription, chunk size: {len(frame_bytes)} bytes")
+            # Compute chunk offset and duration based on PCM conversion.
+            pcm16_data = audioop.ulaw2lin(frame_bytes, 2)
+            samples = len(pcm16_data) // 2
+            chunk_duration = samples / 8000.0  # in seconds
+            offset = self.total_samples / 8000.0  # cumulative offset in seconds
+            self.total_samples += samples
+
             transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)
             if transcript_text:
                 self.logger.info(f"Real-time transcript obtained: {transcript_text}")
+
+                # Generate tokens by splitting transcript text evenly over the chunk duration.
+                words = transcript_text.split()
+                tokens = []
+                if words:
+                    token_duration = chunk_duration / len(words)
+                    token_offset = offset
+                    for word in words:
+                        tokens.append({
+                            "type": "word",
+                            "value": word,
+                            "confidence": 1.0,
+                            "offset": f"PT{token_offset:.2f}S",
+                            "duration": f"PT{token_duration:.2f}S"
+                        })
+                        token_offset += token_duration
+
                 transcript_event = {
                     "version": "2",
                     "type": "event",
@@ -324,15 +351,18 @@ class AudioHookServer:
                                 "type": "transcript",
                                 "data": {
                                     "id": str(uuid.uuid4()),
-                                    "channelId": "external",
+                                    "channelId": 0,
                                     "isFinal": False,
+                                    "offset": f"PT{offset:.2f}S",
+                                    "duration": f"PT{chunk_duration:.2f}S",
                                     "alternatives": [
                                         {
                                             "confidence": 1.0,
                                             "interpretations": [
                                                 {
                                                     "type": "display",
-                                                    "transcript": transcript_text
+                                                    "transcript": transcript_text,
+                                                    "tokens": tokens
                                                 }
                                             ]
                                         }

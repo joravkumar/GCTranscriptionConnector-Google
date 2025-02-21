@@ -64,17 +64,19 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
             # Build the explicit decoding configuration.
-            # Since v2 no longer exposes an AudioEncoding enum, we use 1 (which corresponds to LINEAR16).
             explicit_config = cloud_speech.ExplicitDecodingConfig(
                 encoding=1,  # LINEAR16
                 sample_rate_hertz=8000,
                 audio_channel_count=channels,
             )
-            # Build the recognition configuration.
+            # Build the recognition configuration
             config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=explicit_config,
                 language_codes=[source_language],
                 model=GOOGLE_SPEECH_MODEL,
+                features=cloud_speech.RecognitionFeatures(
+                    enable_word_time_offsets=True
+                )
             )
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":

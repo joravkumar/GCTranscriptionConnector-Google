@@ -332,7 +332,13 @@ class AudioHookServer:
             source_language = self.conversation_language
             self.logger.debug(f"Source language for transcription: {source_language}")
 
-            transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)
+            # Build a media dictionary that ensures the language key is present.
+            media_info = {}
+            if self.negotiated_media:
+                media_info = dict(self.negotiated_media)
+            media_info["language"] = source_language
+
+            transcript_text = await translate_audio(frame_bytes, media_info, self.logger)
             if transcript_text:
                 self.logger.info(f"Real-time transcript obtained: {transcript_text}")
 

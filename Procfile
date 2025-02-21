@@ -1,1 +1,1 @@
-web: python oai_middleware.py
+web: python main.py

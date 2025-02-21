@@ -16,8 +16,6 @@ This repository contains a production-ready implementation of a Genesys AudioHoo
 - [Usage](#usage)
 - [Error Handling and Logging](#error-handling-and-logging)
 - [Configuration](#configuration)
-- [References](#references)
-- [License](#license)
 
 ---
 
@@ -93,7 +91,7 @@ The application is built around the following core components:
   Contains helper functions such as `format_json` (for pretty-printing JSON) and `parse_iso8601_duration` (to handle duration strings).
 
 - **Aptfile**  
-  Ensures that the system package `ffmpeg` is installed on DigitalOcean's App Platform to support audio conversion:
+  Ensures that the system packages `libvpx7` and `ffmpeg` is installed on DigitalOcean's App Platform to support audio conversion:
   ```
   ffmpeg
   libvpx7
@@ -147,12 +145,16 @@ This project is designed to run on DigitalOcean App Platform or similar PaaS off
   - The Python buildpack (or a Dockerfile if you choose that path) handles application dependencies using `requirements.txt`.
 
 - **Environment Variables:**  
-  Ensure that the following environment variables are set in your deployment environment:
-  - `OPENAI_API_KEY`
-  - `GENESYS_API_KEY`
-  - `GENESYS_ORG_ID`
-  - `SUPPORTED_LANGUAGES` (default: `"es-ES,it-IT,en-US"`)
-  - Any other configuration variables defined in `config.py`.
+  The following environment variables must be configured in your deployment environment:
+
+  | Variable | Description | Default |
+  |----------|-------------|---------|
+  | `OPENAI_TRANSCRIPTION_MODEL` | OpenAI model to use for transcription. Currently only supports "whisper-1" | "whisper-1" |
+  | `OPENAI_API_KEY` | Your OpenAI API key for accessing the transcription service | - |
+  | `GENESYS_API_KEY` | Must match the API Key configured in the Genesys Cloud Transcription Connector integration | - |
+  | `GENESYS_ORG_ID` | The source Genesys Cloud organization ID that has enabled the Transcription Connector integration | - |
+  | `SUPPORTED_LANGUAGES` | Comma-separated list of supported input languages (ISO codes) | "es-ES,it-IT,en-US" |
+  | `DEBUG` | Set to "true" for increased logging granularity in server logs | "false" |
 
 - **Procfile:**  
   The Procfile specifies the command to start the application:
@@ -175,6 +177,7 @@ This project is designed to run on DigitalOcean App Platform or similar PaaS off
 
 - **System Package:**  
   - **FFmpeg:** Installed automatically via the Aptfile.
+  - **libvpx7:** Installed automatically via the Aptfile.
 
 ---
 

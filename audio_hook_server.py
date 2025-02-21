@@ -52,6 +52,9 @@ class AudioHookServer:
         # New: total samples processed for offset calculation.
         self.total_samples = 0
 
+        # New: store conversation language from open message.
+        self.conversation_language = "en-US"
+
         self.logger.info(f"New session started: {self.session_id}")        
 
     async def handle_error(self, msg: dict):
@@ -163,6 +166,12 @@ class AudioHookServer:
 
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
+
+        # Capture conversation language from the open message parameters.
+        if "language" in msg["parameters"]:
+            self.conversation_language = normalize_language_code(msg["parameters"]["language"])
+        else:
+            self.conversation_language = "en-US"
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -319,11 +328,8 @@ class AudioHookServer:
             offset = self.total_samples / 8000.0  # cumulative offset in seconds
             self.total_samples += samples
 
-            # Determine the source language from negotiated media.
-            if self.negotiated_media and "language" in self.negotiated_media:
-                source_language = normalize_language_code(self.negotiated_media["language"])
-            else:
-                source_language = "en-US"
+            # Use the conversation language stored during the open message.
+            source_language = self.conversation_language
             self.logger.debug(f"Source language for transcription: {source_language}")
 
             transcript_text = await translate_audio(frame_bytes, self.negotiated_media, self.logger)

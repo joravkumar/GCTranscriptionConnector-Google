@@ -13,7 +13,7 @@ from config import (
 )
 
 # Define a minimum RMS energy threshold (tunable) for processing audio.
-MIN_RMS_THRESHOLD = 200
+MIN_RMS_THRESHOLD = 500
 
 def normalize_language_code(lang: str) -> str:
     """

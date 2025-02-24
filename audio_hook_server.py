@@ -381,6 +381,14 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     is_final = result.is_final
+
+                    # --- NEW LINES: Info-level logs for transcript and words ---
+                    self.logger.info(f"Transcript text: {transcript_text} (is_final={is_final})")
+                    if is_final and alt.words:
+                        words_joined = " ".join([w.word for w in alt.words])
+                        self.logger.info(f"Transcribed words: {words_joined}")
+                    # ----------------------------------------------------------
+
                     if is_final and alt.words:
                         words = []
                         for word_info in alt.words:

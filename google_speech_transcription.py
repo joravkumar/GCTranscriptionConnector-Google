@@ -62,11 +62,14 @@ class StreamingTranscription:
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
+            # Log the language and translation settings for debugging
+            self.logger.info(f"Setting up streaming recognition - Language: {self.language}, "
+                           f"Translation to en-US enabled: {self.language.lower() != 'en-us'}")
             recognition_config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                     encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
                     sample_rate_hertz=8000,
-                    audio_channel_count=self.channels
+                    audio_channel_count=1  # Always 1 since audio is converted to mono
                 ),
                 language_codes=[self.language],
                 model=GOOGLE_SPEECH_MODEL,
@@ -77,7 +80,6 @@ class StreamingTranscription:
             )
 
             # If the source language is not English, enable translation to en-US.
-            # NOTE: TranslationConfig accepts only target_language.
             if self.language.lower() != "en-us":
                 recognition_config.translation_config = cloud_speech.TranslationConfig(
                     target_language="en-US"
@@ -107,6 +109,7 @@ class StreamingTranscription:
                     except queue.Empty:
                         continue
 
+            # Transcribes the audio into text
             responses_iterator = client.streaming_recognize(requests=audio_generator())
             for response in responses_iterator:
                 self.logger.debug(f"Streaming recognition response: {response}")

@@ -19,21 +19,31 @@ if not GOOGLE_CLOUD_PROJECT:
     raise ValueError("GOOGLE_CLOUD_PROJECT not found in environment variables.")
 
 # Centralized service account credentials JSON key.
-# This environment variable should contain the entire JSON key as a string.
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
 if not GOOGLE_APPLICATION_CREDENTIALS:
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not found in environment variables.")
 
 # New environment variable to set the speech recognition model.
-# Defaults to "chirp_2" if not provided.
 GOOGLE_SPEECH_MODEL = os.getenv('GOOGLE_SPEECH_MODEL', 'chirp_2')
 
-# New environment variable for Genesys API key.
+# New environment variables for Gemini API
+GOOGLE_TRANSLATION_MODEL = os.getenv('GOOGLE_TRANSLATION_MODEL')
+if not GOOGLE_TRANSLATION_MODEL:
+    raise ValueError("GOOGLE_TRANSLATION_MODEL not found in environment variables.")
+
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables.")
+
+GOOGLE_TRANSLATION_DEST_LANGUAGE = os.getenv('GOOGLE_TRANSLATION_DEST_LANGUAGE')
+if not GOOGLE_TRANSLATION_DEST_LANGUAGE:
+    raise ValueError("GOOGLE_TRANSLATION_DEST_LANGUAGE not found in environment variables.")
+
+# Genesys API key and Organization ID
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:
     raise ValueError("GENESYS_API_KEY not found in environment variables.")
 
-# New environment variable for Genesys Organization ID.
 GENESYS_ORG_ID = os.getenv('GENESYS_ORG_ID')
 if not GENESYS_ORG_ID:
     raise ValueError("GENESYS_ORG_ID not found in environment variables.")

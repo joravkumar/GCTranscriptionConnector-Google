@@ -37,7 +37,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         return {"transcript": "", "words": []}
     try:
         logger.debug(f"google_speech_transcription - Translating audio chunk of length: {len(audio_stream)} bytes")
-        # Determine number of channels from negotiated_media; default to 1.
+        # Determine number of channels from negotiated media; default to 1.
         channels = 1
         if negotiated_media and "channels" in negotiated_media:
             channels = len(negotiated_media.get("channels", []))
@@ -50,6 +50,11 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         # Compute RMS value for debugging to assess audio energy.
         rms_value = audioop.rms(pcm16_data, 2)
         logger.debug(f"google_speech_transcription - PCM16 RMS value: {rms_value}")
+        
+        # If energy is too low, skip transcription to avoid arbitrary results.
+        if rms_value < 50:
+            logger.debug(f"PCM16 RMS value {rms_value} below threshold, skipping transcription.")
+            return {"transcript": "", "words": []}
 
         # Compute MD5 hash of PCM16 data for correlation.
         hash_digest = hashlib.md5(pcm16_data).hexdigest()
@@ -120,7 +125,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                 start = word.start_offset.total_seconds()
                             if word.end_offset is not None:
                                 end = word.end_offset.total_seconds()
-
                             words_list.append({
                                 "word": word.word,
                                 "start_time": start,

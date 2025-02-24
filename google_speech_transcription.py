@@ -114,8 +114,14 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                     words_list = []
                     if hasattr(alt, "words") and alt.words:
                         for word in alt.words:
-                            start = (word.start_time.seconds + word.start_time.nanos/1e9) if word.start_time else 0.0
-                            end = (word.end_time.seconds + word.end_time.nanos/1e9) if word.end_time else 0.0
+                            # Use start_offset and end_offset per the v2 WordInfo spec.
+                            start = 0.0
+                            end = 0.0
+                            if word.start_offset:
+                                start = word.start_offset.seconds + word.start_offset.nanos / 1e9
+                            if word.end_offset:
+                                end = word.end_offset.seconds + word.end_offset.nanos / 1e9
+
                             words_list.append({
                                 "word": word.word,
                                 "start_time": start,

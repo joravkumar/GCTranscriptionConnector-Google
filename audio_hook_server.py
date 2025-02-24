@@ -6,9 +6,10 @@ import websockets
 import tempfile
 import audioop
 import logging
+import threading
+import queue
 from pydub import AudioSegment
 from websockets.exceptions import ConnectionClosed
-import queue
 
 from config import (
     RATE_LIMIT_MAX_RETRIES,
@@ -17,14 +18,26 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES
+    SUPPORTED_LANGUAGES,
+    GOOGLE_CLOUD_PROJECT,
+    GOOGLE_APPLICATION_CREDENTIALS
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 from google_speech_transcription import normalize_language_code
 
 from collections import deque
+from google.cloud.speech_v2 import SpeechClient
+from google.cloud.speech_v2.types import cloud_speech
+from google.api_core.client_options import ClientOptions
+
 logger = logging.getLogger("AudioHookServer")
+
+try:
+    credentials_info = json.loads(GOOGLE_APPLICATION_CREDENTIALS)
+    _credentials = service_account.Credentials.from_service_account_info(credentials_info)
+except Exception as e:
+    _credentials = None
 
 class AudioHookServer:
     def __init__(self, websocket):
@@ -50,15 +63,17 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # New: total samples processed for offset calculation (kept for compatibility)
+        # Total samples processed for offset calculation
         self.total_samples = 0
 
-        # New: store conversation language from open message
+        # Store conversation language from open message
         self.conversation_language = "en-US"
 
-        # New: queue for streaming audio frames and event loop reference
+        # Streaming recognition queues and tasks
         self.audio_queue = queue.Queue()
-        self.loop = asyncio.get_event_loop()
+        self.response_queue = queue.Queue()
+        self.streaming_thread = None
+        self.process_responses_task = None
 
         self.logger.info(f"New session started: {self.session_id}")
 
@@ -199,8 +214,11 @@ class AudioHookServer:
                     "supportedLanguages": supported_langs
                 }
             }
-            self.server_seq += 1
-            await self._send_json(opened_msg)
+            if await self._send_json(opened_msg):
+                self.server_seq += 1
+            else:
+                await self.disconnect_session(reason="error", info="Failed to send opened message")
+                return
             return
 
         offered_media = msg["parameters"].get("media", [])
@@ -222,8 +240,11 @@ class AudioHookServer:
                     "info": "No supported format found"
                 }
             }
-            self.server_seq += 1
-            await self._send_json(resp)
+            if await self._send_json(resp):
+                self.server_seq += 1
+            else:
+                await self.disconnect_session(reason="error", info="Failed to send disconnect message")
+                return
             self.running = False
             return
 
@@ -240,11 +261,17 @@ class AudioHookServer:
                 "media": [chosen]
             }
         }
-        self.server_seq += 1
-        await self._send_json(opened_msg)
+        if await self._send_json(opened_msg):
+            self.server_seq += 1
+        else:
+            await self.disconnect_session(reason="error", info="Failed to send opened message")
+            return
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
-        # Start streaming recognition after session is opened
-        self.streaming_task = asyncio.create_task(self.start_streaming_recognition())
+
+        # Start streaming recognition
+        self.streaming_thread = threading.Thread(target=self.streaming_recognize_thread)
+        self.streaming_thread.start()
+        self.process_responses_task = asyncio.create_task(self.process_responses())
 
     async def handle_ping(self, msg: dict):
         pong_msg = {
@@ -255,15 +282,15 @@ class AudioHookServer:
             "id": self.session_id,
             "parameters": {}
         }
-        self.server_seq += 1
-        try:
-            await asyncio.wait_for(self._send_json(pong_msg), timeout=1.0)
-        except asyncio.TimeoutError:
-            self.logger.error("Failed to send pong response within timeout")
+        if await self._send_json(pong_msg):
+            self.server_seq += 1
+        else:
+            self.logger.error("Failed to send pong response")
+            await self.disconnect_session(reason="error", info="Failed to send pong message")
 
     async def handle_close(self, msg: dict):
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
-        
+
         closed_msg = {
             "version": "2",
             "type": "closed",
@@ -274,11 +301,11 @@ class AudioHookServer:
                 "summary": ""
             }
         }
-        self.server_seq += 1
-        try:
-            await asyncio.wait_for(self._send_json(closed_msg), timeout=4.0)
-        except asyncio.TimeoutError:
-            self.logger.error("Failed to send closed response within timeout")
+        if await self._send_json(closed_msg):
+            self.server_seq += 1
+        else:
+            self.logger.error("Failed to send closed response")
+            await self.disconnect_session(reason="error", info="Failed to send closed message")
 
         duration = time.time() - self.start_time
         self.logger.info(
@@ -287,9 +314,12 @@ class AudioHookServer:
             f"Frames received: {self.audio_frames_received}"
         )
 
-        # Stop streaming recognition by sending sentinel to queue
-        self.audio_queue.put(None)
         self.running = False
+        self.audio_queue.put(None)  # Signal to stop streaming
+        if self.streaming_thread:
+            self.streaming_thread.join()
+        if self.process_responses_task:
+            self.process_responses_task.cancel()
 
     async def disconnect_session(self, reason="completed", info=""):
         try:
@@ -297,7 +327,7 @@ class AudioHookServer:
                 return
 
             disconnect_msg = {
-                "version": "2", 
+                "version": "2",
                 "type": "disconnect",
                 "seq": self.server_seq + 1,
                 "clientseq": self.client_seq,
@@ -308,8 +338,10 @@ class AudioHookServer:
                     "outputVariables": {}
                 }
             }
-            self.server_seq += 1
-            await asyncio.wait_for(self._send_json(disconnect_msg), timeout=5.0)
+            if await self._send_json(disconnect_msg):
+                self.server_seq += 1
+            else:
+                self.logger.error("Failed to send disconnect message")
             try:
                 await asyncio.wait_for(self.ws.wait_closed(), timeout=5.0)
             except asyncio.TimeoutError:
@@ -318,174 +350,157 @@ class AudioHookServer:
             self.logger.error(f"Error in disconnect_session: {e}")
         finally:
             self.running = False
+            self.audio_queue.put(None)  # Signal to stop streaming
+            if self.streaming_thread:
+                self.streaming_thread.join()
+            if self.process_responses_task:
+                self.process_responses_task.cancel()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
-        # Convert to PCM16 and put into queue for streaming recognition
         pcm16_data = audioop.ulaw2lin(frame_bytes, 2)
-        samples = len(pcm16_data) // 2
-        self.total_samples += samples  # Keep track of total samples for compatibility
         self.audio_queue.put(pcm16_data)
-        # Optionally keep audio_buffer for debugging
+        samples = len(pcm16_data) // 2
+        self.total_samples += samples
         self.audio_buffer.append(frame_bytes)
 
-    async def start_streaming_recognition(self):
-        await asyncio.to_thread(self.run_streaming_recognition)
-
-    def run_streaming_recognition(self):
-        from google.cloud.speech_v2 import SpeechClient
-        from google.cloud.speech_v2.types import cloud_speech
-        from google.api_core.client_options import ClientOptions
-        from config import GOOGLE_CLOUD_PROJECT, GOOGLE_SPEECH_MODEL, _credentials
-
+    def streaming_recognize_thread(self):
         try:
-            client = SpeechClient(
-                credentials=_credentials,
-                client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
+            client = SpeechClient(credentials=_credentials, client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com"))
+            channels = 1
+            if self.negotiated_media and "channels" in self.negotiated_media:
+                channels = len(self.negotiated_media.get("channels", []))
+                if channels == 0:
+                    channels = 1
+            recognition_config = cloud_speech.RecognitionConfig(
+                explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                    encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                    sample_rate_hertz=8000,
+                    audio_channel_count=channels
+                ),
+                language_codes=[self.conversation_language],
+                model="chirp_2",
+                features=cloud_speech.RecognitionFeatures(
+                    enable_word_time_offsets=True,
+                    enable_word_confidence=True
+                )
             )
-            requests = self.audio_stream()
-            self.logger.info("Starting streaming recognition with Google Speech-to-Text API")
-            responses = client.streaming_recognize(requests=requests)
-            for response in responses:
-                for result in response.results:
-                    transcript = result.alternatives[0].transcript.strip()
-                    confidence = result.alternatives[0].confidence
-                    is_final = result.is_final
-                    words = [
-                        {
-                            "word": word.word,
-                            "start_time": word.start_time.total_seconds(),
-                            "end_time": word.end_time.total_seconds(),
-                            "confidence": word.confidence
-                        }
-                        for word in result.alternatives[0].words
-                    ]
-                    # Calculate offset and duration from word timestamps
-                    if words:
-                        start_time = words[0]["start_time"]
-                        end_time = words[-1]["end_time"]
-                        offset = f"PT{start_time:.2f}S"
-                        duration = f"PT{(end_time - start_time):.2f}S"
-                    else:
-                        offset = f"PT0.00S"
-                        duration = f"PT0.00S"
+            if self.conversation_language.lower() != "en-us":
+                recognition_config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
 
-                    # Filter out low-confidence or arbitrary transcriptions
-                    arbitrary_words = {"sí", "mhm"}
-                    if transcript.lower() in arbitrary_words and confidence < 0.7:
-                        self.logger.debug(f"Skipping low-confidence arbitrary transcript: {transcript} (confidence: {confidence})")
+            streaming_config = cloud_speech.StreamingRecognitionConfig(
+                config=recognition_config,
+                streaming_features=cloud_speech.StreamingRecognitionFeatures(
+                    interim_results=True,
+                    enable_voice_activity_events=True
+                )
+            )
+            config_request = cloud_speech.StreamingRecognizeRequest(
+                recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
+                streaming_config=streaming_config,
+            )
+
+            def audio_generator():
+                yield config_request
+                while self.running:
+                    try:
+                        pcm16_data = self.audio_queue.get(timeout=0.1)
+                        if pcm16_data is None:
+                            break
+                        yield cloud_speech.StreamingRecognizeRequest(audio=pcm16_data)
+                    except queue.Empty:
                         continue
 
-                    self.logger.info(f"Streaming transcript obtained: {transcript} (confidence: {confidence}, isFinal: {is_final})")
-                    future = self.loop.run_coroutine_threadsafe(
-                        self.send_transcript_event(transcript, confidence, is_final, offset, duration, words)
-                    )
+            responses_iterator = client.streaming_recognize(requests=audio_generator())
+            for response in responses_iterator:
+                self.response_queue.put(response)
         except Exception as e:
-            self.logger.error(f"Error in streaming recognition: {e}", exc_info=True)
-            future = self.loop.run_coroutine_threadsafe(
-                self.disconnect_session(reason="error", info="Streaming recognition error")
-            )
-        finally:
-            self.logger.info("Streaming recognition stopped")
+            self.logger.error(f"Streaming recognition error: {e}")
+            self.response_queue.put(e)
 
-    def audio_stream(self):
-        from google.cloud.speech_v2.types import cloud_speech
-        from config import GOOGLE_CLOUD_PROJECT, GOOGLE_SPEECH_MODEL
+    async def process_responses(self):
+        while self.running:
+            try:
+                if not self.response_queue.empty():
+                    response = self.response_queue.get_nowait()
+                    if isinstance(response, Exception):
+                        await self.disconnect_session(reason="error", info="Streaming recognition failed")
+                        break
+                    await self.process_streaming_response(response)
+                else:
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                self.logger.error(f"Error processing response: {e}")
 
-        source_language = self.conversation_language
-        channels = 1
-        if self.negotiated_media and "channels" in self.negotiated_media:
-            channels = len(self.negotiated_media["channels"])
-            if channels == 0:
-                channels = 1
+    async def process_streaming_response(self, response):
+        for result in response.results:
+            if not result.alternatives:
+                continue
+            alt = result.alternatives[0]
+            transcript_text = alt.transcript
+            is_final = result.is_final
+            if is_final and alt.words:
+                # Extract word timings for final results
+                words = []
+                for word_info in alt.words:
+                    start_time = word_info.start_offset.total_seconds()
+                    end_time = word_info.end_offset.total_seconds()
+                    words.append({
+                        "type": "word",
+                        "value": word_info.word,
+                        "confidence": word_info.confidence,
+                        "offset": f"PT{start_time:.2f}S",
+                        "duration": f"PT{(end_time - start_time):.2f}S",
+                        "language": self.conversation_language
+                    })
+                offset = words[0]["offset"] if words else "PT0S"
+                duration = f"PT{(end_time - start_time):.2f}S" if words else "PT0S"
+            else:
+                # For interim results, use approximate offset
+                current_offset = self.total_samples / 8000.0
+                offset = f"PT{current_offset:.2f}S"
+                duration = "PT0S"  # Interim, duration not accurate
+                words = None  # No word-level info for interim
 
-        explicit_config = cloud_speech.ExplicitDecodingConfig(
-            encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=8000,
-            audio_channel_count=channels
-        )
-        recognition_config = cloud_speech.RecognitionConfig(
-            explicit_decoding_config=explicit_config,
-            language_codes=[source_language],
-            model=GOOGLE_SPEECH_MODEL,
-            features=cloud_speech.RecognitionFeatures(
-                enable_word_time_offsets=True,
-                enable_word_confidence=True
-            )
-        )
-        if source_language.lower() != "en-us":
-            recognition_config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
-        streaming_config = cloud_speech.StreamingRecognitionConfig(
-            config=recognition_config,
-            streaming_features=cloud_speech.StreamingRecognitionFeatures(
-                interim_results=True
-            )
-        )
-        config_request = cloud_speech.StreamingRecognizeRequest(
-            recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
-            streaming_config=streaming_config,
-        )
-        yield config_request
-
-        self.logger.debug("Starting to yield audio frames from queue")
-        while True:
-            pcm16_data = self.audio_queue.get()
-            if pcm16_data is None:
-                self.logger.debug("Received sentinel, stopping audio stream")
-                break
-            yield cloud_speech.StreamingRecognizeRequest(audio=pcm16_data)
-            self.audio_queue.task_done()
-
-    async def send_transcript_event(self, transcript, confidence, is_final, offset, duration, words):
-        tokens = []
-        for word_info in words:
-            token_duration = word_info["end_time"] - word_info["start_time"]
-            tokens.append({
-                "type": "word",
-                "value": word_info["word"],
-                "confidence": word_info["confidence"],
-                "offset": f"PT{word_info['start_time']:.2f}S",
-                "duration": f"PT{token_duration:.2f}S",
-                "language": self.conversation_language
-            })
-        transcript_event = {
-            "version": "2",
-            "type": "event",
-            "seq": self.server_seq + 1,
-            "clientseq": self.client_seq,
-            "id": self.session_id,
-            "parameters": {
-                "entities": [
-                    {
-                        "type": "transcript",
-                        "data": {
-                            "id": str(uuid.uuid4()),
-                            "channelId": 0,
-                            "isFinal": is_final,
-                            "offset": offset,
-                            "duration": duration,
-                            "alternatives": [
-                                {
-                                    "confidence": confidence,
-                                    "languages": [self.conversation_language],
-                                    "interpretations": [
-                                        {
-                                            "type": "display",
-                                            "transcript": transcript,
-                                            "tokens": tokens
-                                        }
-                                    ]
-                                }
-                            ]
+            transcript_event = {
+                "version": "2",
+                "type": "event",
+                "seq": self.server_seq + 1,
+                "clientseq": self.client_seq,
+                "id": self.session_id,
+                "parameters": {
+                    "entities": [
+                        {
+                            "type": "transcript",
+                            "data": {
+                                "id": str(uuid.uuid4()),
+                                "channelId": 0,
+                                "isFinal": is_final,
+                                "offset": offset,
+                                "duration": duration,
+                                "alternatives": [
+                                    {
+                                        "confidence": alt.confidence if is_final else 1.0,
+                                        "languages": [self.conversation_language],
+                                        "interpretations": [
+                                            {
+                                                "type": "display",
+                                                "transcript": transcript_text,
+                                                "tokens": words if words else []
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
                         }
-                    }
-                ]
+                    ]
+                }
             }
-        }
-        self.server_seq += 1
-        self.logger.debug(f"Sending transcript event to Genesys: {transcript} (isFinal: {is_final})")
-        await self._send_json(transcript_event)
+            if await self._send_json(transcript_event):
+                self.server_seq += 1
+            else:
+                self.logger.debug("Transcript event dropped due to rate limiting")
 
     async def _send_json(self, msg: dict):
         try:
@@ -495,10 +510,12 @@ class AudioHookServer:
                     f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
                     f"Message type: {msg.get('type')}. Dropping to maintain compliance."
                 )
-                return
+                return False  # Message not sent
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
+            return True  # Message sent
         except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False
+            return False

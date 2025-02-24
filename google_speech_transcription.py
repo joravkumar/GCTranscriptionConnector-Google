@@ -119,7 +119,11 @@ class StreamingTranscription:
         """Feed audio data (PCMU) into the streaming queue after converting to PCM16."""
         if not audio_stream:
             return
+        # Convert from PCMU (u-law) to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
+        # For multi-channel (interleaved) audio, convert to mono by averaging channels
+        if self.channels > 1:
+            pcm16_data = audioop.tomono(pcm16_data, 2, 0.5, 0.5)
         self.logger.debug(f"Converted PCMU to PCM16: {len(pcm16_data)} bytes")
         self.audio_queue.put(pcm16_data)
 

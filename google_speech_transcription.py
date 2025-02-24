@@ -106,7 +106,6 @@ class StreamingTranscription:
 
             responses_iterator = client.streaming_recognize(requests=audio_generator())
             for response in responses_iterator:
-                self.logger.info(f"Streaming recognition response for channel {channel}: {response}")
                 self.response_queues[channel].put(response)
         except Exception as e:
             self.logger.error(f"Streaming recognition error for channel {channel}: {e}")

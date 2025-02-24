@@ -69,9 +69,16 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
-            # Use auto_decoding_config for auto-detection of audio parameters.
+            # Explicit decoding config to match the raw PCM16 data we are passing.
+            explicit_config = cloud_speech.ExplicitDecodingConfig(
+                encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=8000,
+                audio_channel_count=channels
+            )
+
+            # Build the recognition config
             config = cloud_speech.RecognitionConfig(
-                auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+                explicit_decoding_config=explicit_config,
                 language_codes=[source_language],
                 model=GOOGLE_SPEECH_MODEL,
                 features=cloud_speech.RecognitionFeatures(
@@ -82,7 +89,13 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":
                 config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
-            logger.debug(f"google_speech_transcription - Sending recognition request with auto_decoding_config, channels={channels}, language={source_language}, model={GOOGLE_SPEECH_MODEL}")
+
+            logger.debug(
+                "google_speech_transcription - Sending recognition request with "
+                f"LINEAR16 decoding, sample_rate=8000, channels={channels}, "
+                f"language={source_language}, model={GOOGLE_SPEECH_MODEL}"
+            )
+
             request = cloud_speech.RecognizeRequest(
                 recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
                 config=config,
@@ -92,6 +105,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             response = client.recognize(request=request)
             duration = time.time() - start_time
             logger.debug(f"google_speech_transcription - Recognition API call took {duration:.3f} seconds")
+
             result_data = {}
             # Process the first result available.
             for result in response.results:

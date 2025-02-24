@@ -356,8 +356,10 @@ class AudioHookServer:
 
     async def process_transcription_responses(self):
         while self.running:
+            self.logger.debug("Checking for transcription responses")
             response = self.streaming_transcription.get_response()
             if response:
+                self.logger.debug(f"Processing transcription response: {response}")
                 if isinstance(response, Exception):
                     self.logger.error(f"Streaming recognition error: {response}")
                     await self.disconnect_session(reason="error", info="Streaming recognition failed")

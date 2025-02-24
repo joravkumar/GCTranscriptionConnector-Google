@@ -8,6 +8,7 @@ import audioop
 import logging
 from pydub import AudioSegment
 from websockets.exceptions import ConnectionClosed
+import queue
 
 from config import (
     RATE_LIMIT_MAX_RETRIES,
@@ -20,7 +21,7 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import translate_audio, normalize_language_code
+from google_speech_transcription import normalize_language_code
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -49,13 +50,17 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # New: total samples processed for offset calculation.
+        # New: total samples processed for offset calculation (kept for compatibility)
         self.total_samples = 0
 
-        # New: store conversation language from open message.
+        # New: store conversation language from open message
         self.conversation_language = "en-US"
 
-        self.logger.info(f"New session started: {self.session_id}")        
+        # New: queue for streaming audio frames and event loop reference
+        self.audio_queue = queue.Queue()
+        self.loop = asyncio.get_event_loop()
+
+        self.logger.info(f"New session started: {self.session_id}")
 
     async def handle_error(self, msg: dict):
         error_code = msg["parameters"].get("code")
@@ -167,7 +172,7 @@ class AudioHookServer:
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
 
-        # Capture conversation language from the open message parameters.
+        # Capture conversation language from the open message parameters
         if "language" in msg["parameters"]:
             self.conversation_language = normalize_language_code(msg["parameters"]["language"])
         else:
@@ -180,7 +185,7 @@ class AudioHookServer:
 
         if is_probe:
             self.logger.info("Detected probe connection")
-            # Prepare supported languages list from the comma-separated config value.
+            # Prepare supported languages list from the comma-separated config value
             supported_langs = [lang.strip() for lang in SUPPORTED_LANGUAGES.split(",")]
             opened_msg = {
                 "version": "2",
@@ -238,6 +243,8 @@ class AudioHookServer:
         self.server_seq += 1
         await self._send_json(opened_msg)
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
+        # Start streaming recognition after session is opened
+        self.streaming_task = asyncio.create_task(self.start_streaming_recognition())
 
     async def handle_ping(self, msg: dict):
         pong_msg = {
@@ -280,6 +287,8 @@ class AudioHookServer:
             f"Frames received: {self.audio_frames_received}"
         )
 
+        # Stop streaming recognition by sending sentinel to queue
+        self.audio_queue.put(None)
         self.running = False
 
     async def disconnect_session(self, reason="completed", info=""):
@@ -313,106 +322,170 @@ class AudioHookServer:
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
-        # Process the audio chunk in real time for transcription.
-        asyncio.create_task(self.process_audio_chunk(frame_bytes))
-        # Optionally, keep audio_buffer if needed for debugging.
+        # Convert to PCM16 and put into queue for streaming recognition
+        pcm16_data = audioop.ulaw2lin(frame_bytes, 2)
+        samples = len(pcm16_data) // 2
+        self.total_samples += samples  # Keep track of total samples for compatibility
+        self.audio_queue.put(pcm16_data)
+        # Optionally keep audio_buffer for debugging
         self.audio_buffer.append(frame_bytes)
 
-    async def process_audio_chunk(self, frame_bytes: bytes):
+    async def start_streaming_recognition(self):
+        await asyncio.to_thread(self.run_streaming_recognition)
+
+    def run_streaming_recognition(self):
+        from google.cloud.speech_v2 import SpeechClient
+        from google.cloud.speech_v2.types import cloud_speech
+        from google.api_core.client_options import ClientOptions
+        from config import GOOGLE_CLOUD_PROJECT, GOOGLE_SPEECH_MODEL, _credentials
+
         try:
-            self.logger.debug(f"Processing audio chunk for real-time transcription, chunk size: {len(frame_bytes)} bytes")
-            # Compute chunk offset and duration based on PCM conversion.
-            pcm16_data = audioop.ulaw2lin(frame_bytes, 2)
-            samples = len(pcm16_data) // 2
-            chunk_duration = samples / 8000.0  # in seconds
-            offset = self.total_samples / 8000.0  # cumulative offset in seconds
-            self.total_samples += samples
-
-            # Use the conversation language stored during the open message.
-            source_language = self.conversation_language
-            self.logger.debug(f"Source language for transcription: {source_language}")
-
-            # Build a media dictionary that ensures the language key is present.
-            media_info = {}
-            if self.negotiated_media:
-                media_info = dict(self.negotiated_media)
-            media_info["language"] = source_language
-
-            # Call the updated translate_audio which returns a dict with transcript and words.
-            result = await translate_audio(frame_bytes, media_info, self.logger)
-            if result and result.get("transcript"):
-                transcript_text = result["transcript"]
-                self.logger.info(f"Real-time transcript obtained: {transcript_text}")
-                tokens = []
-                if result.get("words"):
-                    for word_info in result["words"]:
-                        word_start = offset + word_info["start_time"]
-                        token_duration = word_info["end_time"] - word_info["start_time"]
-                        tokens.append({
-                            "type": "word",
-                            "value": word_info["word"],
-                            "confidence": word_info["confidence"],
-                            "offset": f"PT{word_start:.2f}S",
-                            "duration": f"PT{token_duration:.2f}S",
-                            "language": source_language
-                        })
-                else:
-                    # Fallback: if no word-level info is provided, split the transcript text.
-                    words = transcript_text.split()
+            client = SpeechClient(
+                credentials=_credentials,
+                client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
+            )
+            requests = self.audio_stream()
+            self.logger.info("Starting streaming recognition with Google Speech-to-Text API")
+            responses = client.streaming_recognize(requests=requests)
+            for response in responses:
+                for result in response.results:
+                    transcript = result.alternatives[0].transcript.strip()
+                    confidence = result.alternatives[0].confidence
+                    is_final = result.is_final
+                    words = [
+                        {
+                            "word": word.word,
+                            "start_time": word.start_time.total_seconds(),
+                            "end_time": word.end_time.total_seconds(),
+                            "confidence": word.confidence
+                        }
+                        for word in result.alternatives[0].words
+                    ]
+                    # Calculate offset and duration from word timestamps
                     if words:
-                        token_duration = chunk_duration / len(words)
-                        token_offset = offset
-                        for word in words:
-                            tokens.append({
-                                "type": "word",
-                                "value": word,
-                                "confidence": 1.0,
-                                "offset": f"PT{token_offset:.2f}S",
-                                "duration": f"PT{token_duration:.2f}S",
-                                "language": source_language
-                            })
-                            token_offset += token_duration
+                        start_time = words[0]["start_time"]
+                        end_time = words[-1]["end_time"]
+                        offset = f"PT{start_time:.2f}S"
+                        duration = f"PT{(end_time - start_time):.2f}S"
+                    else:
+                        offset = f"PT0.00S"
+                        duration = f"PT0.00S"
 
-                transcript_event = {
-                    "version": "2",
-                    "type": "event",
-                    "seq": self.server_seq + 1,
-                    "clientseq": self.client_seq,
-                    "id": self.session_id,
-                    "parameters": {
-                        "entities": [
-                            {
-                                "type": "transcript",
-                                "data": {
-                                    "id": str(uuid.uuid4()),
-                                    "channelId": 0,
-                                    "isFinal": True,
-                                    "offset": f"PT{offset:.2f}S",
-                                    "duration": f"PT{chunk_duration:.2f}S",
-                                    "alternatives": [
+                    # Filter out low-confidence or arbitrary transcriptions
+                    arbitrary_words = {"sí", "mhm"}
+                    if transcript.lower() in arbitrary_words and confidence < 0.7:
+                        self.logger.debug(f"Skipping low-confidence arbitrary transcript: {transcript} (confidence: {confidence})")
+                        continue
+
+                    self.logger.info(f"Streaming transcript obtained: {transcript} (confidence: {confidence}, isFinal: {is_final})")
+                    future = self.loop.run_coroutine_threadsafe(
+                        self.send_transcript_event(transcript, confidence, is_final, offset, duration, words)
+                    )
+        except Exception as e:
+            self.logger.error(f"Error in streaming recognition: {e}", exc_info=True)
+            future = self.loop.run_coroutine_threadsafe(
+                self.disconnect_session(reason="error", info="Streaming recognition error")
+            )
+        finally:
+            self.logger.info("Streaming recognition stopped")
+
+    def audio_stream(self):
+        from google.cloud.speech_v2.types import cloud_speech
+        from config import GOOGLE_CLOUD_PROJECT, GOOGLE_SPEECH_MODEL
+
+        source_language = self.conversation_language
+        channels = 1
+        if self.negotiated_media and "channels" in self.negotiated_media:
+            channels = len(self.negotiated_media["channels"])
+            if channels == 0:
+                channels = 1
+
+        explicit_config = cloud_speech.ExplicitDecodingConfig(
+            encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=8000,
+            audio_channel_count=channels
+        )
+        recognition_config = cloud_speech.RecognitionConfig(
+            explicit_decoding_config=explicit_config,
+            language_codes=[source_language],
+            model=GOOGLE_SPEECH_MODEL,
+            features=cloud_speech.RecognitionFeatures(
+                enable_word_time_offsets=True,
+                enable_word_confidence=True
+            )
+        )
+        if source_language.lower() != "en-us":
+            recognition_config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
+        streaming_config = cloud_speech.StreamingRecognitionConfig(
+            config=recognition_config,
+            streaming_features=cloud_speech.StreamingRecognitionFeatures(
+                interim_results=True
+            )
+        )
+        config_request = cloud_speech.StreamingRecognizeRequest(
+            recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/us-central1/recognizers/_",
+            streaming_config=streaming_config,
+        )
+        yield config_request
+
+        self.logger.debug("Starting to yield audio frames from queue")
+        while True:
+            pcm16_data = self.audio_queue.get()
+            if pcm16_data is None:
+                self.logger.debug("Received sentinel, stopping audio stream")
+                break
+            yield cloud_speech.StreamingRecognizeRequest(audio=pcm16_data)
+            self.audio_queue.task_done()
+
+    async def send_transcript_event(self, transcript, confidence, is_final, offset, duration, words):
+        tokens = []
+        for word_info in words:
+            token_duration = word_info["end_time"] - word_info["start_time"]
+            tokens.append({
+                "type": "word",
+                "value": word_info["word"],
+                "confidence": word_info["confidence"],
+                "offset": f"PT{word_info['start_time']:.2f}S",
+                "duration": f"PT{token_duration:.2f}S",
+                "language": self.conversation_language
+            })
+        transcript_event = {
+            "version": "2",
+            "type": "event",
+            "seq": self.server_seq + 1,
+            "clientseq": self.client_seq,
+            "id": self.session_id,
+            "parameters": {
+                "entities": [
+                    {
+                        "type": "transcript",
+                        "data": {
+                            "id": str(uuid.uuid4()),
+                            "channelId": 0,
+                            "isFinal": is_final,
+                            "offset": offset,
+                            "duration": duration,
+                            "alternatives": [
+                                {
+                                    "confidence": confidence,
+                                    "languages": [self.conversation_language],
+                                    "interpretations": [
                                         {
-                                            "confidence": result.get("confidence", 1.0),
-                                            "languages": [source_language],
-                                            "interpretations": [
-                                                {
-                                                    "type": "display",
-                                                    "transcript": transcript_text,
-                                                    "tokens": tokens
-                                                }
-                                            ]
+                                            "type": "display",
+                                            "transcript": transcript,
+                                            "tokens": tokens
                                         }
                                     ]
                                 }
-                            }
-                        ]
+                            ]
+                        }
                     }
-                }
-                self.server_seq += 1
-                await self._send_json(transcript_event)
-            else:
-                self.logger.warning("No transcript generated for this audio chunk")
-        except Exception as e:
-            self.logger.error(f"Error during real-time transcription processing: {e}", exc_info=True)
+                ]
+            }
+        }
+        self.server_seq += 1
+        self.logger.debug(f"Sending transcript event to Genesys: {transcript} (isFinal: {is_final})")
+        await self._send_json(transcript_event)
 
     async def _send_json(self, msg: dict):
         try:

@@ -15,11 +15,13 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES
+    SUPPORTED_LANGUAGES,
+    GOOGLE_TRANSLATION_DEST_LANGUAGE
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 from google_speech_transcription import StreamingTranscription, normalize_language_code
+from google_gemini_translation import translate_with_gemini
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -369,7 +371,6 @@ class AudioHookServer:
 
     async def process_transcription_responses(self, channel):
         while self.running:
-            self.logger.debug(f"Checking for transcription responses on channel {channel}")
             response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
             if response:
                 self.logger.debug(f"Processing transcription response on channel {channel}: {response}")
@@ -382,37 +383,23 @@ class AudioHookServer:
                         continue
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
-                    is_final = result.is_final
-
-                    self.logger.info(f"Transcript text: {transcript_text} (is_final={is_final}, channel={channel})")
-                    if is_final and alt.words:
-                        words_joined = " ".join([w.word for w in alt.words])
-                        self.logger.info(f"Transcribed words: {words_joined}")
-
-                    if is_final and alt.words:
-                        words = []
-                        for word_info in alt.words:
-                            start_time = word_info.start_offset.total_seconds()
-                            end_time = word_info.end_offset.total_seconds()
-                            words.append({
-                                "type": "word",
-                                "value": word_info.word,
-                                "confidence": word_info.confidence,
-                                "offset": f"PT{start_time:.2f}S",
-                                "duration": f"PT{(end_time - start_time):.2f}S",
-                                "language": self.conversation_language
-                            })
-                        offset = words[0]["offset"] if words else "PT0S"
-                        duration = f"PT{(end_time - start_time):.2f}S" if words else "PT0S"
+                    source_lang = result.language_code
+                    dest_lang = GOOGLE_TRANSLATION_DEST_LANGUAGE
+                    translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
+                    
+                    # Calculate offset and duration
+                    if alt.words:
+                        first_start = alt.words[0].start_offset.total_seconds()
+                        last_end = alt.words[-1].end_offset.total_seconds()
+                        offset = f"PT{first_start:.2f}S"
+                        duration = f"PT{(last_end - first_start):.2f}S"
                     else:
                         current_offset = self.total_samples / 8000.0
                         offset = f"PT{current_offset:.2f}S"
                         duration = "PT0S"
-                        words = None
-
-                    # Map channel index to Genesys channelId
-                    channel_id = self.negotiated_media["channels"][channel] if channel < len(self.negotiated_media.get("channels", [])) else 0
-
+                    
+                    channel_id = channel  # Integer channel index
+                    
                     transcript_event = {
                         "version": "2",
                         "type": "event",
@@ -426,18 +413,18 @@ class AudioHookServer:
                                     "data": {
                                         "id": str(uuid.uuid4()),
                                         "channelId": channel_id,
-                                        "isFinal": is_final,
+                                        "isFinal": True,
                                         "offset": offset,
                                         "duration": duration,
                                         "alternatives": [
                                             {
-                                                "confidence": alt.confidence if is_final else 1.0,
-                                                "languages": [self.conversation_language],
+                                                "confidence": alt.confidence,
+                                                "languages": [dest_lang],
                                                 "interpretations": [
                                                     {
                                                         "type": "display",
-                                                        "transcript": transcript_text,
-                                                        "tokens": words if words else []
+                                                        "transcript": translated_text,
+                                                        "tokens": []
                                                     }
                                                 ]
                                             }

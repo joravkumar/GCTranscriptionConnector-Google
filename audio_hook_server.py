@@ -20,7 +20,8 @@ from config import (
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import StreamingTranscription, normalize_language_code, translate_with_gemini
+from google_speech_transcription import StreamingTranscription, normalize_language_code
+from google_gemini_translation import translate_with_gemini
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")

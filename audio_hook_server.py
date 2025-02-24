@@ -391,18 +391,29 @@ class AudioHookServer:
                         self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
                         continue  # Skip sending the event if translation failed
                     
-                    # Calculate offset and duration
+                    # Calculate offset and duration from the original transcription
                     if alt.words:
                         first_start = alt.words[0].start_offset.total_seconds()
                         last_end = alt.words[-1].end_offset.total_seconds()
                         offset = f"PT{first_start:.2f}S"
                         duration = f"PT{(last_end - first_start):.2f}S"
                     else:
-                        current_offset = self.total_samples / 8000.0
+                        # Fallback if no word timing is available
+                        current_offset = self.total_samples / 8000.0  # Assuming 8kHz sample rate
                         offset = f"PT{current_offset:.2f}S"
                         duration = "PT0S"
                     
                     channel_id = channel  # Integer channel index
+                    
+                    # Create a single token for the entire translated text
+                    tokens = [{
+                        "type": "word",
+                        "value": translated_text,
+                        "confidence": alt.confidence,
+                        "offset": offset,
+                        "duration": duration,
+                        "language": dest_lang
+                    }]
                     
                     transcript_event = {
                         "version": "2",
@@ -417,7 +428,7 @@ class AudioHookServer:
                                     "data": {
                                         "id": str(uuid.uuid4()),
                                         "channelId": channel_id,
-                                        "isFinal": True,
+                                        "isFinal": result.is_final,
                                         "offset": offset,
                                         "duration": duration,
                                         "alternatives": [
@@ -428,7 +439,7 @@ class AudioHookServer:
                                                     {
                                                         "type": "display",
                                                         "transcript": translated_text,
-                                                        "tokens": []
+                                                        "tokens": tokens
                                                     }
                                                 ]
                                             }
@@ -443,7 +454,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)   
 
     async def _send_json(self, msg: dict):
         try:

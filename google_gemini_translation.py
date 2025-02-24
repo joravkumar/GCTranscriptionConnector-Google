@@ -15,6 +15,8 @@ async def translate_with_gemini(text: str, source_language: str, dest_language: 
     Returns:
         str: The translated text, or the original text if translation fails.
     """
+    logger.info(f"Starting translation from {source_language} to {dest_language} for text: '{text}'")
+    
     def sync_translate():
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
@@ -26,16 +28,20 @@ async def translate_with_gemini(text: str, source_language: str, dest_language: 
             - Type: string
             - Description: The translated text in {dest_language}
             """
+            logger.debug(f"System prompt: {system_prompt}")
+            logger.debug(f"Text to translate: '{text}'")
+            
             response = client.models.generate_content(
                 model=GOOGLE_TRANSLATION_MODEL,
                 contents=[system_prompt, text],
                 config={'response_mime_type': 'text/plain'}
             )
             translated_text = response.text.strip()
-            logger.debug(f"Translated '{text}' to '{translated_text}'")
+            logger.info(f"Translation successful: '{translated_text}'")
             return translated_text
         except Exception as e:
-            logger.error(f"Error translating text with Gemini API: {e}")
+            logger.error(f"Error translating text with Gemini API: {type(e).__name__} - {str(e)}")
+            logger.debug("Falling back to original text due to translation error")
             return text  # Fallback to original text if translation fails
 
     return await asyncio.to_thread(sync_translate)

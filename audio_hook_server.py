@@ -347,11 +347,22 @@ class AudioHookServer:
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
-        pcm16_data = audioop.ulaw2lin(frame_bytes, 2)
+
+        # Compute how many "sample times" based on negotiated channels
+        channels = 1
+        if self.negotiated_media and "channels" in self.negotiated_media:
+            channels = len(self.negotiated_media.get("channels", []))
+            if channels == 0:
+                channels = 1
+
+        # For PCMU, each channel is 1 byte per sample time
+        sample_times = len(frame_bytes) // channels
+        self.total_samples += sample_times
+
+        # Pass raw PCMU to the transcription logic (actual PCM16 conversion happens in google_speech_transcription.py)
         if self.streaming_transcription:
-            self.streaming_transcription.feed_audio(pcm16_data)
-        samples = len(pcm16_data) // 2
-        self.total_samples += samples
+            self.streaming_transcription.feed_audio(frame_bytes)
+
         self.audio_buffer.append(frame_bytes)
 
     async def process_transcription_responses(self):

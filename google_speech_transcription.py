@@ -37,7 +37,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         return {"transcript": "", "words": []}
     try:
         logger.debug(f"google_speech_transcription - Translating audio chunk of length: {len(audio_stream)} bytes")
-        # Determine number of channels from negotiated media; default to 1.
+        # Determine number of channels from negotiated_media; default to 1.
         channels = 1
         if negotiated_media and "channels" in negotiated_media:
             channels = len(negotiated_media.get("channels", []))
@@ -114,13 +114,12 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                     words_list = []
                     if hasattr(alt, "words") and alt.words:
                         for word in alt.words:
-                            # Use start_offset and end_offset per the v2 WordInfo spec.
                             start = 0.0
                             end = 0.0
-                            if word.start_offset:
-                                start = word.start_offset.seconds + word.start_offset.nanos / 1e9
-                            if word.end_offset:
-                                end = word.end_offset.seconds + word.end_offset.nanos / 1e9
+                            if word.start_offset is not None:
+                                start = word.start_offset.total_seconds()
+                            if word.end_offset is not None:
+                                end = word.end_offset.total_seconds()
 
                             words_list.append({
                                 "word": word.word,

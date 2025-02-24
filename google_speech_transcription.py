@@ -118,7 +118,7 @@ class StreamingTranscription:
             return
         # Convert from PCMU (u-law) to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
-        self.logger.debug(f"Converted PCMU to PCM16 for channel {channel}: {len(pcm16_data)} bytes")
+        self.logger.info(f"Converted PCMU to PCM16 for channel {channel}: {len(pcm16_data)} bytes")
         self.audio_queues[channel].put(pcm16_data)
 
     def get_response(self, channel: int):
@@ -130,13 +130,12 @@ class StreamingTranscription:
         except queue.Empty:
             return None
 
-# Original synchronous function (unchanged)
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> dict:
     if not audio_stream:
         logger.warning("google_speech_transcription - No audio data received for transcription.")
         return {"transcript": "", "words": []}
     try:
-        logger.debug(f"google_speech_transcription - Translating audio chunk of length: {len(audio_stream)} bytes")
+        logger.info("Starting transcription process")
         # Determine number of channels from negotiated media; default to 1.
         channels = 1
         if negotiated_media and "channels" in negotiated_media:
@@ -146,26 +145,22 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
 
         # Convert the incoming PCMU (u-law) data to PCM16.
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
-        logger.debug(f"google_speech_transcription - Converted PCMU to PCM16: {len(pcm16_data)} bytes, sample_width=2, frame_rate=8000, channels={channels}")
+        logger.info(f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, channels={channels}")
         # Compute RMS value for debugging to assess audio energy.
         rms_value = audioop.rms(pcm16_data, 2)
-        logger.debug(f"google_speech_transcription - PCM16 RMS value: {rms_value}")
+        logger.debug(f"PCM16 RMS value: {rms_value}")
         
         # If energy is too low, skip transcription to avoid arbitrary results.
         if rms_value < 50:
-            logger.debug(f"PCM16 RMS value {rms_value} below threshold, skipping transcription.")
+            logger.info("PCM16 RMS value below threshold, skipping transcription")
             return {"transcript": "", "words": []}
-
-        # Compute MD5 hash of PCM16 data for correlation.
-        hash_digest = hashlib.md5(pcm16_data).hexdigest()
-        logger.debug(f"google_speech_transcription - PCM16 data MD5: {hash_digest}")
 
         # Extract the source language from negotiated_media if provided; default to "en-US".
         source_language_raw = "en-US"
         if negotiated_media and "language" in negotiated_media:
             source_language_raw = negotiated_media["language"]
         source_language = normalize_language_code(source_language_raw)
-        logger.debug(f"google_speech_transcription - Source language determined as: {source_language}")
+        logger.info(f"Source language determined as: {source_language}")
 
         def transcribe():
             if not GOOGLE_CLOUD_PROJECT:
@@ -211,7 +206,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             start_time = time.time()
             response = client.recognize(request=request)
             duration = time.time() - start_time
-            logger.debug(f"google_speech_transcription - Recognition API call took {duration:.3f} seconds")
+            logger.info(f"Recognition API call took {duration:.3f} seconds")
 
             result_data = {}
             # Process the first result available.
@@ -245,7 +240,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             return result_data
 
         result = await asyncio.to_thread(transcribe)
-        logger.debug(f"google_speech_transcription - Received result: {result}")
+        logger.info(f"Transcription result: {result}")
         return result
     except Exception as e:
         logger.error(f"google_speech_transcription - Error during transcription: {e}", exc_info=True)

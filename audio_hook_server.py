@@ -338,26 +338,40 @@ class AudioHookServer:
                 media_info = dict(self.negotiated_media)
             media_info["language"] = source_language
 
-            transcript_text = await translate_audio(frame_bytes, media_info, self.logger)
-            if transcript_text:
+            # Call the updated translate_audio which returns a dict with transcript and words.
+            result = await translate_audio(frame_bytes, media_info, self.logger)
+            if result and result.get("transcript"):
+                transcript_text = result["transcript"]
                 self.logger.info(f"Real-time transcript obtained: {transcript_text}")
-
-                # Generate tokens by splitting transcript text evenly over the chunk duration.
-                words = transcript_text.split()
                 tokens = []
-                if words:
-                    token_duration = chunk_duration / len(words)
-                    token_offset = offset
-                    for word in words:
+                if result.get("words"):
+                    for word_info in result["words"]:
+                        word_start = offset + word_info["start_time"]
+                        token_duration = word_info["end_time"] - word_info["start_time"]
                         tokens.append({
                             "type": "word",
-                            "value": word,
-                            "confidence": 1.0,
-                            "offset": f"PT{token_offset:.2f}S",
+                            "value": word_info["word"],
+                            "confidence": word_info["confidence"],
+                            "offset": f"PT{word_start:.2f}S",
                             "duration": f"PT{token_duration:.2f}S",
                             "language": source_language
                         })
-                        token_offset += token_duration
+                else:
+                    # Fallback: if no word-level info is provided, split the transcript text.
+                    words = transcript_text.split()
+                    if words:
+                        token_duration = chunk_duration / len(words)
+                        token_offset = offset
+                        for word in words:
+                            tokens.append({
+                                "type": "word",
+                                "value": word,
+                                "confidence": 1.0,
+                                "offset": f"PT{token_offset:.2f}S",
+                                "duration": f"PT{token_duration:.2f}S",
+                                "language": source_language
+                            })
+                            token_offset += token_duration
 
                 transcript_event = {
                     "version": "2",
@@ -377,7 +391,7 @@ class AudioHookServer:
                                     "duration": f"PT{chunk_duration:.2f}S",
                                     "alternatives": [
                                         {
-                                            "confidence": 1.0,
+                                            "confidence": result.get("confidence", 1.0),
                                             "languages": [source_language],
                                             "interpretations": [
                                                 {

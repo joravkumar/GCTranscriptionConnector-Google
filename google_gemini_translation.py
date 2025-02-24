@@ -1,5 +1,5 @@
 import asyncio
-from google import genai
+import google.generativeai as genai
 from config import GEMINI_API_KEY, GOOGLE_TRANSLATION_MODEL
 
 async def translate_with_gemini(text: str, source_language: str, dest_language: str, logger) -> str:

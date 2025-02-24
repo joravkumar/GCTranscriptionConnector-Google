@@ -75,15 +75,19 @@ class StreamingTranscription:
                     enable_word_confidence=True
                 )
             )
+
+            # If the source language is not English, enable translation to en-US
             if self.language.lower() != "en-us":
                 recognition_config.translation_config = cloud_speech.TranslationConfig(
+                    source_language_code=self.language,  # Explicitly set the source language
                     target_language="en-US"
                 )
 
+            # Streaming config with interim_results disabled so we only see final (translated) output
             streaming_config = cloud_speech.StreamingRecognitionConfig(
                 config=recognition_config,
                 streaming_features=cloud_speech.StreamingRecognitionFeatures(
-                    interim_results=True,
+                    interim_results=False,
                     enable_voice_activity_events=True
                 )
             )
@@ -189,7 +193,10 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             )
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":
-                config.translation_config = cloud_speech.TranslationConfig(target_language="en-US")
+                config.translation_config = cloud_speech.TranslationConfig(
+                    source_language_code=source_language,
+                    target_language="en-US"
+                )
 
             logger.debug(
                 "google_speech_transcription - Sending recognition request with "

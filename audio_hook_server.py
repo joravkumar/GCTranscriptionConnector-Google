@@ -175,6 +175,7 @@ class AudioHookServer:
             self.conversation_language = normalize_language_code(msg["parameters"]["language"])
         else:
             self.conversation_language = "en-US"
+        self.logger.info(f"Conversation language set to: {self.conversation_language}")
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and

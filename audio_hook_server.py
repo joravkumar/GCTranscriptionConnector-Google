@@ -381,7 +381,7 @@ class AudioHookServer:
                                 "confidence": word_info.confidence,
                                 "offset": f"PT{start_time:.2f}S",
                                 "duration": f"PT{(end_time - start_time):.2f}S",
-                                "language": self.conversation_language
+                                "language": "en-US"  # Updated to reflect English output
                             })
                         offset = words[0]["offset"] if words else "PT0S"
                         duration = f"PT{(end_time - start_time):.2f}S" if words else "PT0S"
@@ -410,7 +410,7 @@ class AudioHookServer:
                                         "alternatives": [
                                             {
                                                 "confidence": alt.confidence if is_final else 1.0,
-                                                "languages": [self.conversation_language],
+                                                "languages": ["en-US"],  # Updated to reflect English output
                                                 "interpretations": [
                                                     {
                                                         "type": "display",

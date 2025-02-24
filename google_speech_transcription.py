@@ -31,10 +31,19 @@ try:
 except Exception as e:
     _credentials = None
 
-async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> str:
+async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> dict:
+    """
+    Transcribe the given audio_stream using Google Cloud Speech-to-Text v2 API (chirp_2 model)
+    with word-level time offsets and confidence enabled.
+    
+    Returns a dictionary with keys:
+      - "transcript": The full transcript text.
+      - "tokens": A list of tokens (each with type, value, confidence, offset (in seconds), and duration in seconds)
+                  relative to the start of the provided audio chunk.
+    """
     if not audio_stream:
         logger.warning("google_speech_transcription - No audio data received for transcription.")
-        return ""
+        return {"transcript": "", "tokens": []}
     try:
         logger.debug(f"google_speech_transcription - Translating audio chunk of length {len(audio_stream)} bytes")
         # Determine number of channels from negotiated media; default to 1.
@@ -78,13 +87,14 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 sample_rate_hertz=8000,
                 audio_channel_count=channels,
             )
-            # Build the recognition configuration
+            # Build the recognition configuration with word-level time offsets and word confidence enabled.
             config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=explicit_config,
                 language_codes=[source_language],
                 model=GOOGLE_SPEECH_MODEL,
                 features=cloud_speech.RecognitionFeatures(
-                    enable_word_time_offsets=True
+                    enable_word_time_offsets=True,
+                    enable_word_confidence=True
                 )
             )
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
@@ -100,17 +110,34 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             response = client.recognize(request=request)
             duration = time.time() - start_time
             logger.debug(f"google_speech_transcription - Recognition API call took {duration:.3f} seconds")
-            transcripts = []
+            full_transcript = ""
+            tokens = []
             for result in response.results:
                 if result.alternatives:
-                    transcripts.append(result.alternatives[0].transcript)
-            if not transcripts:
+                    alt = result.alternatives[0]
+                    # Append transcript text
+                    full_transcript += alt.transcript + " "
+                    # If word-level details are available, process them.
+                    if alt.words:
+                        for word in alt.words:
+                            # Compute start offset and duration in seconds from Duration objects.
+                            start = word.start_offset.seconds + word.start_offset.nanos / 1e9 if word.start_offset else 0.0
+                            end = word.end_offset.seconds + word.end_offset.nanos / 1e9 if word.end_offset else start
+                            duration_sec = end - start
+                            tokens.append({
+                                "type": "word",
+                                "value": word.word,
+                                "confidence": word.confidence if word.HasField("confidence") else 1.0,
+                                "offset": start,
+                                "duration": duration_sec
+                            })
+            if not full_transcript.strip():
                 logger.warning("google_speech_transcription - No transcript alternatives returned from recognition API")
-            return " ".join(transcripts)
+            return {"transcript": full_transcript.strip(), "tokens": tokens}
 
-        transcript = await asyncio.to_thread(transcribe)
-        logger.debug(f"google_speech_transcription - Received transcript: {transcript}")
-        return transcript
+        result = await asyncio.to_thread(transcribe)
+        logger.debug(f"google_speech_transcription - Received transcript: {result.get('transcript','')}")
+        return result
     except Exception as e:
         logger.error(f"google_speech_transcription - Error during transcription: {e}", exc_info=True)
-        return ""
+        return {"transcript": "", "tokens": []}

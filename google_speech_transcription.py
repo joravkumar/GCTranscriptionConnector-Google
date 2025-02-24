@@ -105,6 +105,7 @@ class StreamingTranscription:
 
             responses_iterator = client.streaming_recognize(requests=audio_generator())
             for response in responses_iterator:
+                self.logger.debug(f"Streaming recognition response: {response}")
                 self.response_queue.put(response)
         except Exception as e:
             self.logger.error(f"Streaming recognition error: {e}")
@@ -115,6 +116,7 @@ class StreamingTranscription:
         if not audio_stream:
             return
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
+        self.logger.debug(f"Converted PCMU to PCM16: {len(pcm16_data)} bytes")
         self.audio_queue.put(pcm16_data)
 
     def get_response(self):

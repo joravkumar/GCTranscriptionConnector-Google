@@ -15,13 +15,11 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES,
-    GOOGLE_TRANSLATION_DEST_LANGUAGE
+    SUPPORTED_LANGUAGES
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 from google_speech_transcription import StreamingTranscription, normalize_language_code
-from google_gemini_translation import translate_with_gemini
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -56,9 +54,9 @@ class AudioHookServer:
         # Store conversation language from open message
         self.conversation_language = "en-US"
 
-        # Streaming transcription
-        self.streaming_transcription = None
-        self.process_responses_task = None
+        # Streaming transcription for each channel
+        self.streaming_transcriptions = []
+        self.process_responses_tasks = []
 
         self.logger.info(f"New session started: {self.session_id}")
 
@@ -177,7 +175,6 @@ class AudioHookServer:
             self.conversation_language = normalize_language_code(msg["parameters"]["language"])
         else:
             self.conversation_language = "en-US"
-        self.logger.info(f"Conversation language set to: {self.conversation_language}")
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -254,13 +251,16 @@ class AudioHookServer:
             return
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
-        # Set channels to 2 for stereo audio (two participants)
-        channels = 2
+        # Determine number of channels
+        channels = len(self.negotiated_media.get("channels", [])) if self.negotiated_media and "channels" in self.negotiated_media else 1
+        if channels == 0:
+            channels = 1
 
-        # Initialize and start streaming transcription
-        self.streaming_transcription = StreamingTranscription(self.conversation_language, channels, self.logger)
-        self.streaming_transcription.start_streaming()
-        self.process_responses_task = asyncio.create_task(self.process_transcription_responses())
+        # Initialize streaming transcription for each channel as mono
+        self.streaming_transcriptions = [StreamingTranscription(self.conversation_language, 1, self.logger) for _ in range(channels)]
+        for transcription in self.streaming_transcriptions:
+            transcription.start_streaming()
+        self.process_responses_tasks = [asyncio.create_task(self.process_transcription_responses(channel)) for channel in range(channels)]
 
     async def handle_ping(self, msg: dict):
         pong_msg = {
@@ -304,10 +304,10 @@ class AudioHookServer:
         )
 
         self.running = False
-        if self.streaming_transcription:
-            self.streaming_transcription.stop_streaming()
-        if self.process_responses_task:
-            self.process_responses_task.cancel()
+        for transcription in self.streaming_transcriptions:
+            transcription.stop_streaming()
+        for task in self.process_responses_tasks:
+            task.cancel()
 
     async def disconnect_session(self, reason="completed", info=""):
         try:
@@ -338,34 +338,43 @@ class AudioHookServer:
             self.logger.error(f"Error in disconnect_session: {e}")
         finally:
             self.running = False
-            if self.streaming_transcription:
-                self.streaming_transcription.stop_streaming()
-            if self.process_responses_task:
-                self.process_responses_task.cancel()
+            for transcription in self.streaming_transcriptions:
+                transcription.stop_streaming()
+            for task in self.process_responses_tasks:
+                task.cancel()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
 
-        # Assume 2 channels for stereo audio
-        channels = 2
+        # Compute how many "sample times" based on negotiated channels
+        channels = len(self.negotiated_media.get("channels", [])) if self.negotiated_media and "channels" in self.negotiated_media else 1
+        if channels == 0:
+            channels = 1
+
+        # For PCMU, each channel is 1 byte per sample time
         sample_times = len(frame_bytes) // channels
         self.total_samples += sample_times
 
-        # Pass raw PCMU to the transcription logic
-        if self.streaming_transcription:
-            self.streaming_transcription.feed_audio(frame_bytes)
+        # Deinterleave stereo audio and feed to respective transcription instances
+        if channels == 2:
+            left_channel = frame_bytes[0::2]  # External channel
+            right_channel = frame_bytes[1::2]  # Internal channel
+            self.streaming_transcriptions[0].feed_audio(left_channel, 0)
+            self.streaming_transcriptions[1].feed_audio(right_channel, 0)
+        else:
+            self.streaming_transcriptions[0].feed_audio(frame_bytes, 0)
 
         self.audio_buffer.append(frame_bytes)
 
-    async def process_transcription_responses(self):
+    async def process_transcription_responses(self, channel):
         while self.running:
-            self.logger.debug("Checking for transcription responses")
-            response = self.streaming_transcription.get_response()
+            self.logger.debug(f"Checking for transcription responses on channel {channel}")
+            response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
             if response:
-                self.logger.debug(f"Processing transcription response: {response}")
+                self.logger.debug(f"Processing transcription response on channel {channel}: {response}")
                 if isinstance(response, Exception):
-                    self.logger.error(f"Streaming recognition error: {response}")
+                    self.logger.error(f"Streaming recognition error on channel {channel}: {response}")
                     await self.disconnect_session(reason="error", info="Streaming recognition failed")
                     break
                 for result in response.results:
@@ -374,17 +383,8 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     is_final = result.is_final
-                    channel_tag = result.channel_tag if hasattr(result, 'channel_tag') else 0
 
-                    # Translate the transcript using Gemini API
-                    translated_text = await translate_with_gemini(
-                        transcript_text,
-                        self.conversation_language,
-                        GOOGLE_TRANSLATION_DEST_LANGUAGE,
-                        self.logger
-                    )
-
-                    self.logger.info(f"Transcript text: {translated_text} (is_final={is_final}, channel={channel_tag})")
+                    self.logger.info(f"Transcript text: {transcript_text} (is_final={is_final}, channel={channel})")
                     if is_final and alt.words:
                         words_joined = " ".join([w.word for w in alt.words])
                         self.logger.info(f"Transcribed words: {words_joined}")
@@ -400,7 +400,7 @@ class AudioHookServer:
                                 "confidence": word_info.confidence,
                                 "offset": f"PT{start_time:.2f}S",
                                 "duration": f"PT{(end_time - start_time):.2f}S",
-                                "language": GOOGLE_TRANSLATION_DEST_LANGUAGE
+                                "language": self.conversation_language
                             })
                         offset = words[0]["offset"] if words else "PT0S"
                         duration = f"PT{(end_time - start_time):.2f}S" if words else "PT0S"
@@ -409,6 +409,9 @@ class AudioHookServer:
                         offset = f"PT{current_offset:.2f}S"
                         duration = "PT0S"
                         words = None
+
+                    # Map channel index to Genesys channelId
+                    channel_id = self.negotiated_media["channels"][channel] if channel < len(self.negotiated_media.get("channels", [])) else 0
 
                     transcript_event = {
                         "version": "2",
@@ -422,18 +425,18 @@ class AudioHookServer:
                                     "type": "transcript",
                                     "data": {
                                         "id": str(uuid.uuid4()),
-                                        "channelId": channel_tag,  # Assign to correct participant
+                                        "channelId": channel_id,
                                         "isFinal": is_final,
                                         "offset": offset,
                                         "duration": duration,
                                         "alternatives": [
                                             {
                                                 "confidence": alt.confidence if is_final else 1.0,
-                                                "languages": [GOOGLE_TRANSLATION_DEST_LANGUAGE],
+                                                "languages": [self.conversation_language],
                                                 "interpretations": [
                                                     {
                                                         "type": "display",
-                                                        "transcript": translated_text,
+                                                        "transcript": transcript_text,
                                                         "tokens": words if words else []
                                                     }
                                                 ]

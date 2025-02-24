@@ -1,6 +1,8 @@
 # Genesys AudioHook Transcription Server
 
-This repository contains a production-ready implementation of a Genesys AudioHook server that processes real-time audio streams for transcription using the OpenAI Translation API (currently limited to English). The transcribed text is then injected back into Genesys Cloud via event messages. This server is designed to meet the Genesys AudioHook protocol requirements and supports essential transactions such as session establishment, audio streaming, ping/pong heartbeats, and clean disconnection.
+This repository contains a production-ready implementation of a Genesys AudioHook server that processes real-time audio streams for transcription using the **Google Cloud Speech-to-Text API** and translation using **Google Gemini**. The transcribed and translated text is then injected back into Genesys Cloud via event messages. This server is designed to meet the Genesys AudioHook protocol requirements and supports essential transactions such as session establishment, audio streaming, ping/pong heartbeats, and clean disconnection.
+
+The project is designed to be deployed on **Digital Ocean** (or a similar platform) and integrates with **Google Cloud** for transcription and **Google Gemini** for translation.
 
 ---
 
@@ -9,13 +11,14 @@ This repository contains a production-ready implementation of a Genesys AudioHoo
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Code Structure](#code-structure)
-- [Transcription Processing and Injection](#transcription-processing-and-injection)
+- [Transcription and Translation Processing](#transcription-and-translation-processing)
 - [Language Handling](#language-handling)
 - [Deployment](#deployment)
 - [Prerequisites](#prerequisites)
 - [Usage](#usage)
 - [Error Handling and Logging](#error-handling-and-logging)
 - [Configuration](#configuration)
+
 ---
 
 ## Overview
@@ -23,19 +26,27 @@ This repository contains a production-ready implementation of a Genesys AudioHoo
 The server accepts WebSocket connections from Genesys Cloud (the AudioHook client) and performs the following key operations:
 
 1. **Connection Establishment & Validation:**  
-   The server validates incoming HTTPS upgrade requests against required headers (e.g., API key, organization ID) and negotiates a media format (typically PCMU at 8000 Hz).
+   - Validates incoming HTTPS upgrade requests against required headers (e.g., API key, organization ID).
+   - Negotiates a media format (typically PCMU at 8000 Hz).
 
 2. **Session Lifecycle Management:**  
-   It manages the session lifecycle by handling the "open", "ping", "close", and various other transaction messages. A successful open transaction results in an "opened" message being sent back to Genesys Cloud, after which audio frames can be streamed.
+   - Manages the session lifecycle by handling "open", "ping", "close", and other transaction messages.
+   - Sends an "opened" message to Genesys Cloud upon successful open transaction, enabling audio streaming.
 
 3. **Real-Time Audio Processing:**  
-   Incoming audio frames (in PCMU format) are processed in real time. Each audio frame is converted from PCMU (u-law) to PCM16, then exported to MP3 using FFmpeg (installed via an Aptfile).
+   - Processes incoming audio frames (in PCMU format) in real time.
+   - Converts audio frames from PCMU (u-law) to PCM16 using the Python `audioop` module.
 
-4. **Transcription via OpenAI:**  
-   The MP3 audio chunk is then sent to the OpenAI Translation API (which currently only supports English) to obtain a transcript.
+4. **Transcription via Google Cloud Speech-to-Text:**  
+   - Sends PCM16 audio to the Google Cloud Speech-to-Text API for transcription in the source language.
 
-5. **Injection Back into Genesys Cloud:**  
-   Once a transcript is obtained, the server constructs a transcript event message and sends it over the WebSocket back to Genesys Cloud. This event message follows the Genesys protocol, allowing Genesys Cloud to inject the transcript into the ongoing conversation for purposes such as speech analytics, agent assistance, or further processing.
+5. **Translation via Google Gemini:**  
+   - Translates the transcribed text to the destination language using Google Gemini.
+   - Uses structured output to ensure only the translated text is returned.
+
+6. **Injection Back into Genesys Cloud:**  
+   - Constructs a transcript event message with the translated text.
+   - Sends the message back to Genesys Cloud via the WebSocket connection for injection into the conversation.
 
 ---
 
@@ -44,19 +55,28 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
 The application is built around the following core components:
 
 - **WebSocket Server:**  
-  Uses the `websockets` library to manage connections and message exchanges with Genesys Cloud.
+  - Uses the `websockets` library to manage connections and message exchanges with Genesys Cloud.
 
 - **Session Handler (`AudioHookServer`):**  
-  Responsible for processing incoming messages, handling transactions (open, ping, close, etc.), and managing the rate limiting of messages.
+  - Processes incoming messages, handles transactions (open, ping, close, etc.), and manages rate limiting.
+  - Implemented in `audio_hook_server.py`.
 
-- **Audio Processing and Transcription:**  
-  Audio frames received from Genesys Cloud are processed in real time. The conversion from PCMU to PCM16 is performed using the Python `audioop` module and the `pydub` library (which relies on FFmpeg). The processed audio is then sent to OpenAI's translation endpoint to retrieve the transcript.
+- **Audio Processing:**  
+  - Converts audio frames from PCMU to PCM16 using `audioop`.
+  - Feeds PCM16 audio to Google Cloud Speech-to-Text for transcription.
+  - Translates transcribed text using Google Gemini.
+
+- **Transcription and Translation:**  
+  - **Transcription:** Uses Google Cloud Speech-to-Text API with streaming recognition for real-time transcription.
+  - **Translation:** Uses Google Gemini with structured output to ensure only the translated text is returned.
 
 - **Rate Limiting:**  
-  A custom rate limiter ensures that the server does not exceed Genesys Cloud's messaging rate limits.
+  - Implements a custom rate limiter to prevent exceeding Genesys Cloud's messaging rate limits.
+  - Defined in `rate_limiter.py`.
 
 - **Environment Configuration:**  
-  Configurations such as API keys, supported languages, and rate limit settings are loaded from environment variables via the `config.py` file.
+  - Loads configurations (API keys, Google Cloud settings, rate limits) from environment variables.
+  - Managed in `config.py`.
 
 ---
 
@@ -65,131 +85,119 @@ The application is built around the following core components:
 - **Procfile**  
   Specifies the command to start the application:
   ```
-  web: python oai_middleware.py
+  web: python main.py
   ```
 
-- **oai_middleware.py**  
-  The main entry point that starts the WebSocket server, performs connection validations, and delegates connection handling to the session handler.
+- **main.py**  
+  - Main entry point that starts the WebSocket server.
+  - Validates incoming connections and delegates handling to `AudioHookServer`.
+  - Includes WebSocket handshake validation and health endpoint (`/health`) for Digital Ocean.
 
 - **audio_hook_server.py**  
-  Contains the `AudioHookServer` class, which implements the session lifecycle. This includes handling open, ping, close, error messages, processing audio frames, and sending transcription event messages back to Genesys Cloud.
+  - Contains the `AudioHookServer` class, which manages:
+    - Session lifecycle (open, ping, close, etc.).
+    - Audio frame processing and rate limiting.
+    - Transcription and translation event sending back to Genesys Cloud.
 
-- **openai_translation.py**  
-  Implements the `translate_audio` function that:
-  - Converts raw PCMU audio data to PCM16.
-  - Exports the PCM16 data to an MP3 file using FFmpeg.
-  - Sends the MP3 file to the OpenAI Translation API to obtain a transcript.
-  
+- **google_speech_transcription.py**  
+  - Implements the `StreamingTranscription` class for real-time transcription using Google Cloud Speech-to-Text.
+  - Handles audio conversion from PCMU to PCM16 and feeds it to the API.
+  - Includes `normalize_language_code` for BCP-47 language code normalization.
+
+- **google_gemini_translation.py**  
+  - Implements the `translate_with_gemini` function for translating text using Google Gemini.
+  - Uses structured output (via Pydantic) to ensure only the translation is returned.
+  - Handles translation errors and logs them appropriately.
+
 - **rate_limiter.py**  
-  Provides a basic asynchronous rate limiter used to throttle message sending.
+  - Provides an asynchronous rate limiter (`RateLimiter`) to throttle message sending.
+  - Supports Genesys Cloud's rate limits (e.g., 5 messages/sec, 25 burst limit).
 
 - **config.py**  
-  Loads all configuration variables from environment variables. It includes API keys, Genesys rate limit settings, and supported languages.
+  - Loads all configuration variables from environment variables.
+  - Includes settings for Google Cloud, Google Gemini, Genesys, and rate limiting.
 
 - **utils.py**  
-  Contains helper functions such as `format_json` (for pretty-printing JSON) and `parse_iso8601_duration` (to handle duration strings).
+  - Contains helper functions:
+    - `format_json`: Pretty-prints JSON for logging.
+    - `parse_iso8601_duration`: Parses ISO 8601 duration strings for rate limiting.
+
+- **requirements.txt**  
+  - Lists all Python dependencies required for the project.
 
 ---
 
-## Transcription Processing and Injection
+## Transcription and Translation Processing
 
 1. **Receiving Audio:**  
-   Once the Genesys Cloud client completes the open transaction, it begins streaming audio frames (binary WebSocket messages). Each frame is received in `AudioHookServer.handle_audio_frame`.
+   - Genesys Cloud streams audio frames (binary WebSocket messages) after the open transaction.
+   - Each frame is received in `AudioHookServer.handle_audio_frame`.
 
 2. **Real-Time Processing:**  
-   The received audio frame is processed in real time:
-   - The frame is converted from PCMU (u-law) to PCM16 using the Python `audioop` module.
-   - The PCM16 audio is wrapped into an `AudioSegment` using `pydub`.
+   - Converts audio frames from PCMU (u-law) to PCM16 using `audioop`.
+   - Supports multi-channel audio (e.g., stereo, with external and internal channels).
 
-3. **Conversion to MP3:**  
-   The `AudioSegment.export` method converts the PCM16 audio into an MP3 file. This step relies on FFmpeg, which is installed via the Aptfile.
+3. **Transcription:**  
+   - Uses Google Cloud Speech-to-Text API with streaming recognition.
+   - Feeds PCM16 audio to `StreamingTranscription` instances (one per channel).
+   - Retrieves transcription results with word-level timing and confidence scores.
 
-4. **Calling OpenAI API:**  
-   The MP3 file is sent to the OpenAI Translation API by calling `openai.Audio.translations.create`. The API returns a JSON response containing the transcript text.
+4. **Translation:**  
+   - Sends transcribed text to Google Gemini via `translate_with_gemini`.
+   - Uses structured output (JSON with Pydantic model) to ensure only the translation is returned.
+   - Logs translation failures and skips sending events if translation fails.
 
-5. **Injecting Transcription Back to Genesys Cloud:**  
-   Upon receiving the transcript, the server builds a "transcript" event message:
-   - The message is structured per Genesys Cloud specifications.
-   - It includes a unique transcript ID, a channel identifier (typically `external`), a flag indicating whether the transcript is final (in this implementation, it is marked as interim with `isFinal: False`), and the transcript text in the `alternatives` field.
-   - The event message is then sent to Genesys Cloud using the `_send_json` method, thereby injecting the transcription back into the Genesys Cloud conversation. Genesys Cloud can then use the transcription for features like speech and text analytics or other WEM features.
+5. **Injection Back into Genesys Cloud:**  
+   - Constructs a transcript event message with:
+     - Unique transcript ID.
+     - Channel identifier (e.g., 0 for external, 1 for internal).
+     - Translated text, offset, duration, and confidence.
+   - Sends the event to Genesys Cloud via WebSocket for conversation injection.
 
 ---
 
 ## Language Handling
 
-Since the OpenAI Translation API currently supports only English, the following language handling occurs:
+- **Source Language:**  
+  - Determined from the "language" parameter in the "open" message from Genesys Cloud.
+  - Defaults to "en-US" if not provided.
+  - Normalized to BCP-47 format using `normalize_language_code`.
 
-- **Incoming Language Parameter:**  
-  Genesys Cloud may send an initial language preference in the "open" message. However, regardless of the specified language, the transcription obtained from OpenAI will be in English.
+- **Destination Language:**  
+  - Set via the `GOOGLE_TRANSLATION_DEST_LANGUAGE` environment variable.
+  - All translations are performed to this language.
+  - Normalized to BCP-47 format.
 
-- **Injection of Transcription:**  
-  When constructing the transcript event message, the server does not perform an explicit language update. Instead, it is expected that Genesys Cloud interprets the English transcript accordingly.  
-  *If required by your integration,* you could enhance the system to send an "update" message with the language parameter set to `"en-US"`, ensuring that Genesys Cloud updates the conversation language to English. This is a logical extension if your integration needs to override the client's language settings.
+- **Supported Languages:**  
+  - Defined in the `SUPPORTED_LANGUAGES` environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
+  - Sent to Genesys Cloud in the "opened" message for probe connections.
 
 ---
 
 ## Deployment
 
-This project is specifically designed to be deployed on DigitalOcean as an App Platform service. The deployment can be done using either the provided Dockerfile (recommended) or through buildpacks.
-
-### Dockerfile Deployment
-
-The repository includes a production-ready Dockerfile.
-
-### Digital Ocean App Platform Configuration
-
-To use the Dockerfile deployment method in Digital Ocean App Platform, you need to modify the App Spec configuration:
-
-1. Go to App Settings > App Spec > edit
-2. Locate the `services` section
-3. Replace:
-   ```yaml
-   services:
-     - environment_slug: python
-   ```
-   With:
-   ```yaml
-   services:
-     - dockerfile_path: Dockerfile
-   ```
-4. Leave the rest of the file unaltered
-
-This configuration tells Digital Ocean App Platform to use your Dockerfile for building and deploying the application instead of using the default Python buildpack.
-
-### Alternative Buildpack Deployment
-
-If you prefer using buildpacks instead of Docker:
-
-- **Environment Variables:**  
-  The following environment variables must be configured in your deployment environment:
-
-  | Variable | Description | Default |
-  |----------|-------------|---------|
-  | `OPENAI_TRANSCRIPTION_MODEL` | OpenAI model to use for transcription. Currently only supports "whisper-1" | "whisper-1" |
-  | `OPENAI_API_KEY` | Your OpenAI API key for accessing the transcription service | - |
-  | `GENESYS_API_KEY` | Must match the API Key configured in the Genesys Cloud Transcription Connector integration | - |
-  | `GENESYS_ORG_ID` | The source Genesys Cloud organization ID that has enabled the Transcription Connector integration | - |
-  | `SUPPORTED_LANGUAGES` | Comma-separated list of supported input languages (ISO codes) | "es-ES,it-IT,en-US" |
-  | `DEBUG` | Set to "true" for increased logging granularity in server logs | "false" |
-
-- **Procfile:**  
-  The Procfile specifies the command to start the application:
-  ```
-  web: python oai_middleware.py
-  ```
+This project is designed to be deployed on **Digital Ocean** (or a similar platform). It integrates with **Google Cloud** for transcription (Speech-to-Text API) and **Google Gemini** for translation.
 
 ---
 
 ## Prerequisites
 
-- **Python 3.12.8** (as specified in `runtime.txt`)
 - **Dependencies:**  
   All Python dependencies are listed in `requirements.txt`:
-  - `websockets==15.0`
+  - `websockets`
   - `aiohttp`
   - `pydub`
   - `python-dotenv`
-  - `openai==1.63.2`
+  - `google-cloud-speech`
+  - `google-generativeai`
+
+- **Google Cloud Account:**  
+  - Required for Google Cloud Speech-to-Text API access.
+  - Set up a service account and download the JSON key.
+
+- **Google Gemini API Key:**  
+  - Required for translation services.
+  - Obtain from Google AI Studio or similar.
 
 ---
 
@@ -203,11 +211,10 @@ If you prefer using buildpacks instead of Docker:
      ```
    - Run the server:
      ```bash
-     python oai_middleware.py
+     python main.py
      ```
 
-2. **Deployment on DigitalOcean App Platform:**  
-   - Ensure the Aptfile is included in your repository root.
+2. **Deployment on Digital Ocean App Platform:**  
    - Configure environment variables in the App Platform settings.
    - Deploy the application; the Procfile will trigger the start command.
 
@@ -216,19 +223,71 @@ If you prefer using buildpacks instead of Docker:
 ## Error Handling and Logging
 
 - **Error Logging:**  
-  The server is configured to log detailed debug and error messages. This includes issues with WebSocket connections, audio processing, transcription failures (such as missing FFmpeg), and rate limiting.
+  - Logs detailed debug and error messages for:
+    - WebSocket connection issues.
+    - Audio processing errors.
+    - Transcription and translation failures.
+    - Rate limiting events.
+
+- **Transcription and Translation Logging:**  
+  - Transcription results and events sent to Genesys are logged at the `INFO` level.
+  - Translation failures are logged with details.
 
 - **Graceful Shutdown:**  
-  The server handles close transactions by sending a "closed" message to Genesys Cloud and cleaning up session resources.
+  - Handles close transactions by sending a "closed" message to Genesys Cloud.
+  - Cleans up session resources (stops transcription threads, cancels tasks).
+
+- **Rate Limiting:**  
+  - Implements backoff for 429 errors (rate limit exceeded) from Genesys.
+  - Supports retry-after durations from Genesys or HTTP headers.
 
 ---
 
 ## Configuration
 
-All configurable parameters are defined in `config.py`. This includes:
-- API keys and organization identifiers.
-- Rate limit settings (e.g., `GENESYS_MSG_RATE_LIMIT`, `GENESYS_BINARY_RATE_LIMIT`).
-- Supported languages for transcription.
-- Server listening host, port, and path.
+All configurable parameters are defined in `config.py` and loaded from environment variables. Below is a list of required environment variables:
 
----
+| Variable                          | Description                                                                 | Default                     |
+|-----------------------------------|-----------------------------------------------------------------------------|-----------------------------|
+| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -                           |
+| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -                           |
+| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | 'chirp_2'                   |
+| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -                           |
+| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -                           |
+| `GOOGLE_TRANSLATION_DEST_LANGUAGE`| Destination language for translation (e.g., 'en-US')                        | -                           |
+| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -                           |
+| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -                           |
+| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | "es-ES,it-IT,en-US"         |
+| `DEBUG`                           | Set to "true" for increased logging granularity                             | "false"                     |
+
+### Environment Variable Descriptions:
+
+- **`GOOGLE_CLOUD_PROJECT`**:  
+  The Google Cloud project ID used for accessing the Speech-to-Text API. Required for transcription.
+
+- **`GOOGLE_APPLICATION_CREDENTIALS`**:  
+  The JSON key for a Google Cloud service account, used for authentication with Google Cloud APIs. Must be set as a JSON string in the environment. Google Cloud account with Speech to Text API enabled required.
+
+- **`GOOGLE_SPEECH_MODEL`**:  
+  The speech recognition model to use (e.g., 'chirp_2'). Defaults to 'chirp_2' if not specified.
+
+- **`GOOGLE_TRANSLATION_MODEL`**:  
+  The Google Gemini model to use for translation. Required for translation services.
+
+- **`GEMINI_API_KEY`**:  
+  The API key for accessing Google Gemini genAI services. Get one at https://aistudio.google.com/apikey. Required for translation. 
+
+- **`GOOGLE_TRANSLATION_DEST_LANGUAGE`**:  
+  The destination language for all translations (e.g., 'en-US'). All transcribed text is translated to this language.
+
+- **`GENESYS_API_KEY`**:  
+  The API key configured in the Genesys Cloud Transcription Connector integration. Required for authentication.
+
+- **`GENESYS_ORG_ID`**:  
+  The Genesys Cloud organization ID that has enabled the Transcription Connector integration. Required for validation.
+
+- **`SUPPORTED_LANGUAGES`**:  
+  A comma-separated list of supported input languages for transcription. Sent to Genesys Cloud in "opened" messages for probe connections.
+
+- **`DEBUG`**:  
+  Set to "true" to enable detailed debug logging. Useful for troubleshooting during development.

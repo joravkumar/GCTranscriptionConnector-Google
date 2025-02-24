@@ -80,7 +80,7 @@ class StreamingTranscription:
                     enable_spoken_emojis=True,
                     max_alternatives=1,
                     profanity_filter=False,
-                    enable_separate_recognition_per_channel=True if self.channels > 1 else False
+                    multi_channel_mode=cloud_speech.MultiChannelMode.SEPARATE_RECOGNITION_PER_CHANNEL if self.channels > 1 else cloud_speech.MultiChannelMode.MULTI_CHANNEL_MODE_UNSPECIFIED
                 )
             )
             streaming_config = cloud_speech.StreamingRecognitionConfig(

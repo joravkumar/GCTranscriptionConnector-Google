@@ -373,7 +373,7 @@ class AudioHookServer:
         while self.running:
             response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
             if response:
-                self.logger.debug(f"Processing transcription response on channel {channel}: {response}")
+                self.logger.info(f"Processing transcription response on channel {channel}: {response}")
                 if isinstance(response, Exception):
                     self.logger.error(f"Streaming recognition error on channel {channel}: {response}")
                     await self.disconnect_session(reason="error", info="Streaming recognition failed")
@@ -449,6 +449,7 @@ class AudioHookServer:
                             ]
                         }
                     }
+                    self.logger.info(f"Sending transcription event to Genesys: {json.dumps(transcript_event)}")
                     if await self._send_json(transcript_event):
                         self.server_seq += 1
                     else:

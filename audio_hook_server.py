@@ -15,11 +15,12 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES
+    SUPPORTED_LANGUAGES,
+    GOOGLE_TRANSLATION_DEST_LANGUAGE
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import StreamingTranscription, normalize_language_code
+from google_speech_transcription import StreamingTranscription, normalize_language_code, translate_with_gemini
 
 from collections import deque
 logger = logging.getLogger("AudioHookServer")
@@ -252,12 +253,8 @@ class AudioHookServer:
             return
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
-        # Determine number of channels
-        channels = 1
-        if self.negotiated_media and "channels" in self.negotiated_media:
-            channels = len(self.negotiated_media.get("channels", []))
-            if channels == 0:
-                channels = 1
+        # Set channels to 2 for stereo audio (two participants)
+        channels = 2
 
         # Initialize and start streaming transcription
         self.streaming_transcription = StreamingTranscription(self.conversation_language, channels, self.logger)
@@ -349,18 +346,12 @@ class AudioHookServer:
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
 
-        # Compute how many "sample times" based on negotiated channels
-        channels = 1
-        if self.negotiated_media and "channels" in self.negotiated_media:
-            channels = len(self.negotiated_media.get("channels", []))
-            if channels == 0:
-                channels = 1
-
-        # For PCMU, each channel is 1 byte per sample time
+        # Assume 2 channels for stereo audio
+        channels = 2
         sample_times = len(frame_bytes) // channels
         self.total_samples += sample_times
 
-        # Pass raw PCMU to the transcription logic (actual PCM16 conversion happens in google_speech_transcription.py)
+        # Pass raw PCMU to the transcription logic
         if self.streaming_transcription:
             self.streaming_transcription.feed_audio(frame_bytes)
 
@@ -382,13 +373,20 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     is_final = result.is_final
+                    channel_tag = result.channel_tag if hasattr(result, 'channel_tag') else 0
 
-                    # --- NEW LINES: Info-level logs for transcript and words ---
-                    self.logger.info(f"Transcript text: {transcript_text} (is_final={is_final})")
+                    # Translate the transcript using Gemini API
+                    translated_text = await translate_with_gemini(
+                        transcript_text,
+                        self.conversation_language,
+                        GOOGLE_TRANSLATION_DEST_LANGUAGE,
+                        self.logger
+                    )
+
+                    self.logger.info(f"Transcript text: {translated_text} (is_final={is_final}, channel={channel_tag})")
                     if is_final and alt.words:
                         words_joined = " ".join([w.word for w in alt.words])
                         self.logger.info(f"Transcribed words: {words_joined}")
-                    # ----------------------------------------------------------
 
                     if is_final and alt.words:
                         words = []
@@ -401,7 +399,7 @@ class AudioHookServer:
                                 "confidence": word_info.confidence,
                                 "offset": f"PT{start_time:.2f}S",
                                 "duration": f"PT{(end_time - start_time):.2f}S",
-                                "language": "en-US"  # Updated to reflect English output
+                                "language": GOOGLE_TRANSLATION_DEST_LANGUAGE
                             })
                         offset = words[0]["offset"] if words else "PT0S"
                         duration = f"PT{(end_time - start_time):.2f}S" if words else "PT0S"
@@ -423,18 +421,18 @@ class AudioHookServer:
                                     "type": "transcript",
                                     "data": {
                                         "id": str(uuid.uuid4()),
-                                        "channelId": 0,
+                                        "channelId": channel_tag,  # Assign to correct participant
                                         "isFinal": is_final,
                                         "offset": offset,
                                         "duration": duration,
                                         "alternatives": [
                                             {
                                                 "confidence": alt.confidence if is_final else 1.0,
-                                                "languages": ["en-US"],  # Updated to reflect English output
+                                                "languages": [GOOGLE_TRANSLATION_DEST_LANGUAGE],
                                                 "interpretations": [
                                                     {
                                                         "type": "display",
-                                                        "transcript": transcript_text,
+                                                        "transcript": translated_text,
                                                         "tokens": words if words else []
                                                     }
                                                 ]

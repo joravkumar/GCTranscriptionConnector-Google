@@ -118,7 +118,6 @@ class StreamingTranscription:
             return
         # Convert from PCMU (u-law) to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
-        self.logger.info(f"Converted PCMU to PCM16 for channel {channel}: {len(pcm16_data)} bytes")
         self.audio_queues[channel].put(pcm16_data)
 
     def get_response(self, channel: int):

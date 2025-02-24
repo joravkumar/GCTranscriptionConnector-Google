@@ -76,10 +76,10 @@ class StreamingTranscription:
                 )
             )
 
-            # If the source language is not English, enable translation to en-US
+            # If the source language is not English, enable translation to en-US.
+            # NOTE: TranslationConfig accepts only target_language.
             if self.language.lower() != "en-us":
                 recognition_config.translation_config = cloud_speech.TranslationConfig(
-                    source_language_code=self.language,  # Explicitly set the source language
                     target_language="en-US"
                 )
 
@@ -194,7 +194,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":
                 config.translation_config = cloud_speech.TranslationConfig(
-                    source_language_code=source_language,
                     target_language="en-US"
                 )
 

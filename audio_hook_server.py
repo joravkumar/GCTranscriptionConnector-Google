@@ -384,8 +384,12 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     source_lang = result.language_code
-                    dest_lang = GOOGLE_TRANSLATION_DEST_LANGUAGE
+                    dest_lang = normalize_language_code(GOOGLE_TRANSLATION_DEST_LANGUAGE)  # Normalize to BCP-47
                     translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
+                    
+                    if translated_text is None:
+                        self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
+                        continue  # Skip sending the event if translation failed
                     
                     # Calculate offset and duration
                     if alt.words:

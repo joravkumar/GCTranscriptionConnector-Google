@@ -300,7 +300,7 @@ All configurable parameters are defined in `config.py` and loaded from environme
 | `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -                   |
 | `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -                   |
 | `DEBUG`                           | Set to "true" for increased logging granularity                             | false               |
-| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | es-ES,it-IT,en-US   |
+| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | es-ES,it-IT   |
 | `ENABLE_GEMINI`                   | Set to "true" to enable Gemini translation; "false" to disable translation   | true                |
 
 

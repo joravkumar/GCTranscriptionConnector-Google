@@ -35,10 +35,6 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in environment variables.")
 
-GOOGLE_TRANSLATION_DEST_LANGUAGE = os.getenv('GOOGLE_TRANSLATION_DEST_LANGUAGE')
-if not GOOGLE_TRANSLATION_DEST_LANGUAGE:
-    raise ValueError("GOOGLE_TRANSLATION_DEST_LANGUAGE not found in environment variables.")
-
 # Genesys API key and Organization ID
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:
@@ -56,6 +52,3 @@ GENESYS_BINARY_BURST_LIMIT = 25
 
 # Rate limiting constants 
 RATE_LIMIT_MAX_RETRIES = 3
-
-# Transcription Connector language support
-SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,it-IT,en-US")

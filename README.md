@@ -252,15 +252,16 @@ This project is designed to be deployed on **Digital Ocean** (or a similar platf
 
 All configurable parameters are defined in `config.py` and loaded from environment variables. Below is a list of required environment variables:
 
-| Variable                          | Description                                                                 | Default   |
-|-----------------------------------|-----------------------------------------------------------------------------|-----------|
-| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -         |
-| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -         |
-| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | chirp_2   |
-| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -         |
-| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -         |
-| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -         |
-| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -         |
-| `DEBUG`                           | Set to "true" for increased logging granularity                             | false     |
+| Variable                          | Description                                                                 | Default     |
+|-----------------------------------|-----------------------------------------------------------------------------|-------------|
+| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -           |
+| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -           |
+| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | chirp_2     |
+| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -           |
+| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -           |
+| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -           |
+| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -           |
+| `DEBUG`                           | Set to "true" for increased logging granularity                             | false       |
+| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages                           | es-ES,it-IT |
 
 ---

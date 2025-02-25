@@ -52,3 +52,6 @@ GENESYS_BINARY_BURST_LIMIT = 25
 
 # Rate limiting constants 
 RATE_LIMIT_MAX_RETRIES = 3
+
+# Transcription Connector language support
+SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,it-IT,en-US")

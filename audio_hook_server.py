@@ -14,9 +14,7 @@ from config import (
     GENESYS_BINARY_RATE_LIMIT,
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
-    MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES,
-    GOOGLE_TRANSLATION_DEST_LANGUAGE
+    MAX_AUDIO_BUFFER_SIZE
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
@@ -53,8 +51,11 @@ class AudioHookServer:
         # Total samples processed for offset calculation
         self.total_samples = 0
 
-        # Store conversation language from open message
-        self.conversation_language = "en-US"
+        # New language attributes:
+        # input_language comes from customConfig.inputLanguage (for transcription)
+        # destination_language comes from the "language" field (for translation)
+        self.input_language = "en-US"
+        self.destination_language = "en-US"
 
         # Streaming transcription for each channel
         self.streaming_transcriptions = []
@@ -172,11 +173,14 @@ class AudioHookServer:
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
 
-        # Capture conversation language from the open message parameters
-        if "language" in msg["parameters"]:
-            self.conversation_language = normalize_language_code(msg["parameters"]["language"])
+        # Set languages based on the open message:
+        # - input_language comes from customConfig.inputLanguage (for transcription)
+        # - destination_language comes from the "language" field (for translation)
+        if "customConfig" in msg["parameters"] and "inputLanguage" in msg["parameters"]["customConfig"]:
+            self.input_language = normalize_language_code(msg["parameters"]["customConfig"]["inputLanguage"])
         else:
-            self.conversation_language = "en-US"
+            self.input_language = "en-US"
+        self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -185,8 +189,7 @@ class AudioHookServer:
 
         if is_probe:
             self.logger.info("Detected probe connection")
-            # Prepare supported languages list from the comma-separated config value
-            supported_langs = [lang.strip() for lang in SUPPORTED_LANGUAGES.split(",")]
+            # Removed supportedLanguages key as SUPPORTED_LANGUAGES is no longer used
             opened_msg = {
                 "version": "2",
                 "type": "opened",
@@ -195,8 +198,7 @@ class AudioHookServer:
                 "id": self.session_id,
                 "parameters": {
                     "startPaused": False,
-                    "media": [],
-                    "supportedLanguages": supported_langs
+                    "media": []
                 }
             }
             if await self._send_json(opened_msg):
@@ -258,8 +260,8 @@ class AudioHookServer:
         if channels == 0:
             channels = 1
 
-        # Initialize streaming transcription for each channel as mono
-        self.streaming_transcriptions = [StreamingTranscription(self.conversation_language, 1, self.logger) for _ in range(channels)]
+        # Initialize streaming transcription for each channel as mono using the input language
+        self.streaming_transcriptions = [StreamingTranscription(self.input_language, 1, self.logger) for _ in range(channels)]
         for transcription in self.streaming_transcriptions:
             transcription.start_streaming()
         self.process_responses_tasks = [asyncio.create_task(self.process_transcription_responses(channel)) for channel in range(channels)]
@@ -383,8 +385,9 @@ class AudioHookServer:
                         continue
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
-                    source_lang = result.language_code
-                    dest_lang = normalize_language_code(GOOGLE_TRANSLATION_DEST_LANGUAGE)  # Normalize to BCP-47
+                    # Use the input language from customConfig as the source and the open message language as destination
+                    source_lang = self.input_language
+                    dest_lang = self.destination_language
                     translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
                     
                     if translated_text is None:

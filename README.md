@@ -14,6 +14,7 @@ The project is designed to be deployed on **Digital Ocean** (or a similar platfo
 - [Transcription and Translation Processing](#transcription-and-translation-processing)
 - [Language Handling](#language-handling)
 - [Deployment](#deployment)
+  - [Digital Ocean App Platform Configuration](#digital-ocean-app-platform-configuration)
 - [Prerequisites](#prerequisites)
 - [Usage](#usage)
 - [Error Handling and Logging](#error-handling-and-logging)
@@ -175,13 +176,38 @@ The application is built around the following core components:
   - Used as the target language for translation via Google Gemini.
   - Normalized to BCP-47 format.
 
-*Note: Language handling is now entirely driven by the data provided in the open message, eliminating the need for separate environment variables to define the destination language or supported languages.*
-
 ---
 
 ## Deployment
 
 This project is designed to be deployed on **Digital Ocean** (or a similar platform). It integrates with **Google Cloud** for transcription (Speech-to-Text API) and **Google Gemini** for translation.
+
+### Digital Ocean App Platform Configuration
+
+When deploying this application on Digital Ocean App Platform, you'll need to configure the following settings:
+
+#### HTTP Request Routes
+- **Route Path**: `/audiohook`
+- **Preserve Path Prefix**: Enabled (check this option to ensure the path will remain `/audiohook` when forwarded to the component)
+- **CORS Configuration**: Configure as needed for your environment
+
+#### Ports
+- **Public HTTP Port**: 443 (for HTTPS connections)
+
+#### Health Checks
+- **Path**: `/health`
+- **Protocol**: HTTP
+
+#### Commands
+- **Build Command**: None
+- **Run Command**: `python main.py`
+
+These settings ensure that:
+1. The application listens on the correct path (`/audiohook`) for incoming Genesys Cloud AudioHook connections
+2. The health check path (`/health`) is properly configured to allow Digital Ocean to monitor the application's status
+3. The application starts correctly with the proper run command
+
+When configuring your Genesys Cloud AudioHook integration, use the full URL provided by Digital Ocean (e.g., `https://startish-app-1gxm4.ondigitalocean.app/audiohook`) as your connector endpoint.
 
 ---
 
@@ -221,7 +247,8 @@ This project is designed to be deployed on **Digital Ocean** (or a similar platf
 
 2. **Deployment on Digital Ocean App Platform:**  
    - Configure environment variables in the App Platform settings.
-   - Deploy the application; the Procfile will trigger the start command.
+   - Set up HTTP routes, health checks, and commands as described in the [Digital Ocean App Platform Configuration](#digital-ocean-app-platform-configuration) section.
+   - Deploy the application; the Run Command will trigger the start command.
 
 ---
 
@@ -265,3 +292,5 @@ All configurable parameters are defined in `config.py` and loaded from environme
 | `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages                           | es-ES,it-IT |
 
 ---
+
+*Note: When deploying to Digital Ocean App Platform, be sure to add all required environment variables in the App Settings. For the Google Cloud credentials, you'll need to paste the entire JSON key content into the environment variable.*

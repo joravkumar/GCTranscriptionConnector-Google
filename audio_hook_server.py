@@ -15,7 +15,8 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES
+    SUPPORTED_LANGUAGES,
+    ENABLE_GEMINI
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
@@ -388,14 +389,17 @@ class AudioHookServer:
                         continue
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
-                    # Use the input language from customConfig as the source and the open message language as destination
                     source_lang = self.input_language
-                    dest_lang = self.destination_language
-                    translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
-                    
-                    if translated_text is None:
-                        self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
-                        continue  # Skip sending the event if translation failed
+                    # If Gemini translation is enabled, translate to destination language; otherwise, keep the transcript as is.
+                    if ENABLE_GEMINI:
+                        dest_lang = self.destination_language
+                        translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
+                        if translated_text is None:
+                            self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
+                            continue  # Skip sending the event if translation failed
+                    else:
+                        dest_lang = source_lang
+                        translated_text = transcript_text
                     
                     # Calculate offset and duration from the original transcription
                     if alt.words:

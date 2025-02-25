@@ -84,7 +84,7 @@ The application is built around the following core components:
 
 - **Procfile**  
   Specifies the command to start the application:
-  ```
+  ```bash
   web: python main.py
   ```
 
@@ -144,7 +144,7 @@ The application is built around the following core components:
 
 4. **Translation:**  
    - Sends transcribed text to Google Gemini via `translate_with_gemini`.
-   - Uses structured output (JSON with Pydantic model) to ensure only the translation is returned.
+   - Uses structured output (JSON with Pydantic model) to ensure only the translated text is returned.
    - Logs translation failures and skips sending events if translation fails.
 
 5. **Injection Back into Genesys Cloud:**  
@@ -158,19 +158,24 @@ The application is built around the following core components:
 
 ## Language Handling
 
-- **Source Language:**  
-  - Determined from the "language" parameter in the "open" message from Genesys Cloud.
+- **Input Language (Source):**  
+  - Chirp 2, the default Google model we use for transcription, doesn't support auto language detection. That is why we have to explicitly provide the input language. Determined from the `customConfig.inputLanguage` field in the "open" message received from Genesys Cloud. You have to configure something like this in the Configuration - Advanced section of your GC Transcription connector integration:
+```json 
+	{
+	  "inputLanguage": "es-es"
+	}
+```	
+  
+  - Used for transcription via Google Cloud Speech-to-Text.
   - Defaults to "en-US" if not provided.
   - Normalized to BCP-47 format using `normalize_language_code`.
 
 - **Destination Language:**  
-  - Set via the `GOOGLE_TRANSLATION_DEST_LANGUAGE` environment variable.
-  - All translations are performed to this language.
+  - Determined from the `language` field in the "open" message.
+  - Used as the target language for translation via Google Gemini.
   - Normalized to BCP-47 format.
 
-- **Supported Languages:**  
-  - Defined in the `SUPPORTED_LANGUAGES` environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
-  - Sent to Genesys Cloud in the "opened" message for probe connections.
+*Note: Language handling is now entirely driven by the data provided in the open message, eliminating the need for separate environment variables to define the destination language or supported languages.*
 
 ---
 
@@ -247,47 +252,15 @@ This project is designed to be deployed on **Digital Ocean** (or a similar platf
 
 All configurable parameters are defined in `config.py` and loaded from environment variables. Below is a list of required environment variables:
 
-| Variable                          | Description                                                                 | Default                     |
-|-----------------------------------|-----------------------------------------------------------------------------|-----------------------------|
-| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -                           |
-| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -                           |
-| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | 'chirp_2'                   |
-| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -                           |
-| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -                           |
-| `GOOGLE_TRANSLATION_DEST_LANGUAGE`| Destination language for translation (e.g., 'en-US')                        | -                           |
-| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -                           |
-| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -                           |
-| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | "es-ES,it-IT,en-US"         |
-| `DEBUG`                           | Set to "true" for increased logging granularity                             | "false"                     |
+| Variable                          | Description                                                                 | Default   |
+|-----------------------------------|-----------------------------------------------------------------------------|-----------|
+| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -         |
+| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -         |
+| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | chirp_2   |
+| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -         |
+| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -         |
+| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -         |
+| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -         |
+| `DEBUG`                           | Set to "true" for increased logging granularity                             | false     |
 
-### Environment Variable Descriptions:
-
-- **`GOOGLE_CLOUD_PROJECT`**:  
-  The Google Cloud project ID used for accessing the Speech-to-Text API. Required for transcription.
-
-- **`GOOGLE_APPLICATION_CREDENTIALS`**:  
-  The JSON key for a Google Cloud service account, used for authentication with Google Cloud APIs. Must be set as a JSON string in the environment. Google Cloud account with Speech to Text API enabled required.
-
-- **`GOOGLE_SPEECH_MODEL`**:  
-  The speech recognition model to use (e.g., 'chirp_2'). Defaults to 'chirp_2' if not specified.
-
-- **`GOOGLE_TRANSLATION_MODEL`**:  
-  The Google Gemini model to use for translation. Required for translation services.
-
-- **`GEMINI_API_KEY`**:  
-  The API key for accessing Google Gemini genAI services. Get one at https://aistudio.google.com/apikey. Required for translation. 
-
-- **`GOOGLE_TRANSLATION_DEST_LANGUAGE`**:  
-  The destination language for all translations (e.g., 'en-US'). All transcribed text is translated to this language.
-
-- **`GENESYS_API_KEY`**:  
-  The API key configured in the Genesys Cloud Transcription Connector integration. Required for authentication.
-
-- **`GENESYS_ORG_ID`**:  
-  The Genesys Cloud organization ID that has enabled the Transcription Connector integration. Required for validation.
-
-- **`SUPPORTED_LANGUAGES`**:  
-  A comma-separated list of supported input languages for transcription. Sent to Genesys Cloud in "opened" messages for probe connections.
-
-- **`DEBUG`**:  
-  Set to "true" to enable detailed debug logging. Useful for troubleshooting during development.
+---

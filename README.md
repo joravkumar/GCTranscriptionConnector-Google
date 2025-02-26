@@ -177,7 +177,7 @@ The application is built around the following core components:
   - Normalized to BCP-47 format.
 
 - **Supported Languages:**  
-  - Defined in the SUPPORTED_LANGUAGES environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
+  - Defined in the SUPPORTED_LANGUAGES environment variable (comma-separated, e.g., "es-ES,it-IT,en-US"). They must be supported by the Google model we are leveraging (for Chirp 2, see: https://cloud.google.com/speech-to-text/v2/docs/chirp_2-model)
   - Sent to Genesys Cloud in the "opened" message for probe connections.
 
 - **Translation Toggle:**  

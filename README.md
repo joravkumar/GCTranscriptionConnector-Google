@@ -42,9 +42,9 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
    - Sends PCM16 audio to the Google Cloud Speech-to-Text API for transcription in the source language.
 
 5. **Translation via Google Gemini (Optional):**  
-   - If enabled (via the `ENABLE_GEMINI` environment variable), translates the transcribed text to the destination language using Google Gemini.
-   - Uses structured output to ensure only the translated text is returned.
-   - If disabled, the original transcript is returned without translation, using the input language.
+   - Controlled by the `enableTranslation` boolean in `customConfig` of the "open" message.
+   - If `enableTranslation` is true, translates the transcribed text to the destination language using Google Gemini.
+   - If `enableTranslation` is false or not provided, the original transcript is returned without translation, using the input language.
 
 6. **Injection Back into Genesys Cloud:**  
    - Constructs a transcript event message with the (translated or original) text.
@@ -70,7 +70,7 @@ The application is built around the following core components:
 
 - **Transcription and Translation:**  
   - **Transcription:** Uses Google Cloud Speech-to-Text API with streaming recognition for real-time transcription.
-  - **Translation (Optional):** Uses Google Gemini with structured output to ensure only the translated text is returned. This step is performed only if the `ENABLE_GEMINI` flag is set to true.
+  - **Translation (Optional):** Uses Google Gemini with structured output to ensure only the translated text is returned. This step is performed only if `customConfig.enableTranslation` is true.
 
 - **Rate Limiting:**  
   - Implements a custom rate limiter to prevent exceeding Genesys Cloud's messaging rate limits.
@@ -92,38 +92,38 @@ The application is built around the following core components:
 
 - **main.py**  
   - Main entry point that starts the WebSocket server.
-  - Validates incoming connections and delegates handling to `AudioHookServer`.
-  - Includes WebSocket handshake validation and health endpoint (`/health`) for Digital Ocean.
+  - Validates incoming connections and delegates handling to AudioHookServer.
+  - Includes WebSocket handshake validation and health endpoint (/health) for Digital Ocean.
 
 - **audio_hook_server.py**  
-  - Contains the `AudioHookServer` class, which manages:
+  - Contains the AudioHookServer class, which manages:
     - Session lifecycle (open, ping, close, etc.).
     - Audio frame processing and rate limiting.
     - Transcription and (optionally) translation event sending back to Genesys Cloud.
-  - For probe connections, the server sends the list of supported languages (as defined in the `SUPPORTED_LANGUAGES` environment variable) to Genesys Cloud.
+  - For probe connections, the server sends the list of supported languages (as defined in the SUPPORTED_LANGUAGES environment variable) to Genesys Cloud.
 
 - **google_speech_transcription.py**  
-  - Implements the `StreamingTranscription` class for real-time transcription using Google Cloud Speech-to-Text.
+  - Implements the StreamingTranscription class for real-time transcription using Google Cloud Speech-to-Text.
   - Handles audio conversion from PCMU to PCM16 and feeds it to the API.
-  - Includes `normalize_language_code` for BCP-47 language code normalization.
+  - Includes normalize_language_code for BCP-47 language code normalization.
 
 - **google_gemini_translation.py**  
-  - Implements the `translate_with_gemini` function for translating text using Google Gemini.
+  - Implements the translate_with_gemini function for translating text using Google Gemini.
   - Uses structured output (via Pydantic) to ensure only the translation is returned.
   - Handles translation errors and logs them appropriately.
 
 - **rate_limiter.py**  
-  - Provides an asynchronous rate limiter (`RateLimiter`) to throttle message sending.
+  - Provides an asynchronous rate limiter (RateLimiter) to throttle message sending.
   - Supports Genesys Cloud's rate limits (e.g., 5 messages/sec, 25 burst limit).
 
 - **config.py**  
   - Loads all configuration variables from environment variables.
-  - Includes settings for Google Cloud, Google Gemini, Genesys, rate limiting, supported languages, and the new `ENABLE_GEMINI` flag.
+  - Includes settings for Google Cloud, Google Gemini, Genesys, rate limiting, and supported languages.
 
 - **utils.py**  
   - Contains helper functions:
-    - `format_json`: Pretty-prints JSON for logging.
-    - `parse_iso8601_duration`: Parses ISO 8601 duration strings for rate limiting.
+    - format_json: Pretty-prints JSON for logging.
+    - parse_iso8601_duration: Parses ISO 8601 duration strings for rate limiting.
 
 - **requirements.txt**  
   - Lists all Python dependencies required for the project.
@@ -132,112 +132,117 @@ The application is built around the following core components:
 
 ## Transcription and Translation Processing
 
-1. **Receiving Audio:**  
-   - Genesys Cloud streams audio frames (binary WebSocket messages) after the open transaction.
-   - Each frame is received in `AudioHookServer.handle_audio_frame`.
+- **Receiving Audio:**
+  - Genesys Cloud streams audio frames (binary WebSocket messages) after the open transaction.
+  - Each frame is received in AudioHookServer.handle_audio_frame.
 
-2. **Real-Time Processing:**  
-   - Converts audio frames from PCMU (u-law) to PCM16 using `audioop`.
-   - Supports multi-channel audio (e.g., stereo, with external and internal channels).
+- **Real-Time Processing:**
+  - Converts audio frames from PCMU (u-law) to PCM16 using audioop.
+  - Supports multi-channel audio (e.g., stereo, with external and internal channels).
 
-3. **Transcription:**  
-   - Uses Google Cloud Speech-to-Text API with streaming recognition.
-   - Feeds PCM16 audio to `StreamingTranscription` instances (one per channel).
-   - Retrieves transcription results with word-level timing and confidence scores.
+- **Transcription:**
+  - Uses Google Cloud Speech-to-Text API with streaming recognition.
+  - Feeds PCM16 audio to StreamingTranscription instances (one per channel).
+  - Retrieves transcription results with word-level timing and confidence scores.
 
-4. **Translation (Optional):**  
-   - If the `ENABLE_GEMINI` environment variable is set to true, the transcribed text is sent to Google Gemini for translation into the destination language.
-   - If disabled, the original transcript is returned without translation, using the input language.
-   - Structured output ensures that only the translated (or original) text is returned.
-   - Translation failures are logged and skipped.
+- **Translation via Google Gemini (Optional):**
+  - Controlled by the enableTranslation boolean in customConfig of the "open" message.
+  - If enableTranslation is true, the transcribed text is sent to Google Gemini for translation into the destination language.
+  - If enableTranslation is false or not provided, the original transcript is returned without translation, using the input language.
+  - Structured output ensures that only the translated (or original) text is returned.
+  - Translation failures are logged and skipped.
 
-5. **Injection Back into Genesys Cloud:**  
-   - Constructs a transcript event message with:
-     - Unique transcript ID.
-     - Channel identifier (e.g., 0 for external, 1 for internal).
-     - Translated (or original) text, along with offset, duration, and confidence.
-   - Sends the event to Genesys Cloud via WebSocket for conversation injection.
+- **Injection Back into Genesys Cloud:**
+  - Constructs a transcript event message with:
+    - Unique transcript ID.
+    - Channel identifier (e.g., 0 for external, 1 for internal).
+    - Translated (or original) text, along with offset, duration, and confidence.
+  - Sends the event to Genesys Cloud via WebSocket for conversation injection.
 
 ---
 
 ## Language Handling
 
-- **Input Language (Source):**  
+- **Input Language (Source):**
   - Chirp 2, the default Google model we use for transcription, doesn't support auto language detection. That is why you must explicitly provide the input language.
-  - Determined from the `customConfig.inputLanguage` field in the "open" message received from Genesys Cloud. For example:
+  - Determined from the customConfig.inputLanguage field in the "open" message received from Genesys Cloud. For example:
     ```json
     {
-      "inputLanguage": "es-es"
+      "inputLanguage": "es-es",
+      "enableTranslation": true,
+      "GCOrgId": "81483d3a-2d0f-4493-8bbc-6b677c9f9554"
     }
     ```
   - Used for transcription via Google Cloud Speech-to-Text.
   - Defaults to "en-US" if not provided.
-  - Normalized to BCP-47 format using `normalize_language_code`.
+  - Normalized to BCP-47 format using normalize_language_code.
 
-- **Destination Language:**  
-  - Determined from the `language` field in the "open" message.
+- **Destination Language:**
+  - Determined from the language field in the "open" message.
   - Used as the target language for translation via Google Gemini when translation is enabled.
   - Normalized to BCP-47 format.
 
-- **Supported Languages:**  
-  - Defined in the `SUPPORTED_LANGUAGES` environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
+- **Supported Languages:**
+  - Defined in the SUPPORTED_LANGUAGES environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
   - Sent to Genesys Cloud in the "opened" message for probe connections.
 
-- **Translation Toggle:**  
-  - The new `ENABLE_GEMINI` environment variable (true/false) controls whether the translated text is produced.
-  - If disabled, the server returns the original transcription without translation, using the input language.
+- **Translation Toggle:**
+  - Controlled per session via the enableTranslation boolean in customConfig of the "open" message.
+  - If enableTranslation is true, the server produces translated text.
+  - If enableTranslation is false or not provided, the server returns the original transcription without translation, using the input language.
 
 ---
 
 ## Deployment
 
-This project is designed to be deployed on **Digital Ocean** (or a similar platform). It integrates with **Google Cloud** for transcription (Speech-to-Text API) and **Google Gemini** for translation.
+This project is designed to be deployed on Digital Ocean (or a similar platform). It integrates with Google Cloud for transcription (Speech-to-Text API) and Google Gemini for translation.
 
 ### Digital Ocean App Platform Configuration
 
 When deploying this application on Digital Ocean App Platform, you'll need to configure the following settings:
 
-#### HTTP Request Routes
-- **Route Path**: `/audiohook`
-- **Preserve Path Prefix**: Enabled (check this option to ensure the path will remain `/audiohook` when forwarded to the component)
-- **CORS Configuration**: Configure as needed for your environment
+- **HTTP Request Routes**
+  - Route Path: /audiohook
+  - Preserve Path Prefix: Enabled (check this option to ensure the path will remain /audiohook when forwarded to the component)
+  - CORS Configuration: Configure as needed for your environment
 
-#### Ports
-- **Public HTTP Port**: 443 (for HTTPS connections)
+- **Ports**
+  - Public HTTP Port: 443 (for HTTPS connections)
 
-#### Health Checks
-- **Path**: `/health`
-- **Protocol**: HTTP
+- **Health Checks**
+  - Path: /health
+  - Protocol: HTTP
 
-#### Commands
-- **Build Command**: None
-- **Run Command**: `python main.py`
+- **Commands**
+  - Build Command: None
+  - Run Command: python main.py
 
 These settings ensure that:
-1. The application listens on the correct path (`/audiohook`) for incoming Genesys Cloud AudioHook connections.
-2. The health check path (`/health`) is properly configured to allow Digital Ocean to monitor the application's status.
-3. The application starts correctly with the proper run command.
 
-When configuring your Genesys Cloud AudioHook integration, use the full URL provided by Digital Ocean (e.g., `https://startish-app-1gxm4.ondigitalocean.app/audiohook`) as your connector endpoint.
+- The application listens on the correct path (/audiohook) for incoming Genesys Cloud AudioHook connections.
+- The health check path (/health) is properly configured to allow Digital Ocean to monitor the application's status.
+- The application starts correctly with the proper run command.
+
+When configuring your Genesys Cloud AudioHook integration, use the full URL provided by Digital Ocean (e.g., https://startish-app-1gxm4.ondigitalocean.app/audiohook) as your connector endpoint.
 
 ---
 
 ## Prerequisites
 
-- **Dependencies:**  
-  All Python dependencies are listed in `requirements.txt`:
-  - `websockets`
-  - `aiohttp`
-  - `pydub`
-  - `python-dotenv`
-  - `google-cloud-speech`
-  - `google-generativeai`
+- **Dependencies:**
+  - All Python dependencies are listed in requirements.txt:
+    - websockets
+    - aiohttp
+    - pydub
+    - python-dotenv
+    - google-cloud-speech
+    - google-generativeai
 
-- **Google Cloud Account:**  
+- **Google Cloud Account:**
   - Required for Google Cloud Speech-to-Text API access.
   - Set up a service account and download the JSON key.
 
-- **Google Gemini API Key:**  
+- **Google Gemini API Key:**
   - Required for translation services.
   - Obtain from Google AI Studio or similar.
 
@@ -245,42 +250,42 @@ When configuring your Genesys Cloud AudioHook integration, use the full URL prov
 
 ## Usage
 
-1. **Local Development:**  
-   - Set up your environment variables (you can use a `.env` file).
-   - Install dependencies:
-     ```bash
-     pip install -r requirements.txt
-     ```
-   - Run the server:
-     ```bash
-     python main.py
-     ```
+- **Local Development:**
+  - Set up your environment variables (you can use a .env file).
+  - Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+  - Run the server:
+    ```bash
+    python main.py
+    ```
 
-2. **Deployment on Digital Ocean App Platform:**  
-   - Configure environment variables in the App Platform settings.
-   - Set up HTTP routes, health checks, and commands as described in the [Digital Ocean App Platform Configuration](#digital-ocean-app-platform-configuration) section.
-   - Deploy the application; the Run Command will trigger the start command.
+- **Deployment on Digital Ocean App Platform:**
+  - Configure environment variables in the App Platform settings.
+  - Set up HTTP routes, health checks, and commands as described in the Digital Ocean App Platform Configuration section.
+  - Deploy the application; the Run Command will trigger the start command.
 
 ---
 
 ## Error Handling and Logging
 
-- **Error Logging:**  
+- **Error Logging:**
   - Logs detailed debug and error messages for:
     - WebSocket connection issues.
     - Audio processing errors.
     - Transcription and translation failures.
     - Rate limiting events.
 
-- **Transcription and Translation Logging:**  
-  - Transcription results and events sent to Genesys are logged at the `INFO` level.
+- **Transcription and Translation Logging:**
+  - Transcription results and events sent to Genesys are logged at the INFO level.
   - Translation failures are logged with details.
 
-- **Graceful Shutdown:**  
+- **Graceful Shutdown:**
   - Handles close transactions by sending a "closed" message to Genesys Cloud.
   - Cleans up session resources (stops transcription threads, cancels tasks).
 
-- **Rate Limiting:**  
+- **Rate Limiting:**
   - Implements backoff for 429 errors (rate limit exceeded) from Genesys.
   - Supports retry-after durations from Genesys or HTTP headers.
 
@@ -288,20 +293,16 @@ When configuring your Genesys Cloud AudioHook integration, use the full URL prov
 
 ## Configuration
 
-All configurable parameters are defined in `config.py` and loaded from environment variables. Below is a list of required environment variables:
+All configurable parameters are defined in config.py and loaded from environment variables. Below is a list of required environment variables:
 
-| Variable                          | Description                                                                 | Default             |
-|-----------------------------------|-----------------------------------------------------------------------------|---------------------|
-| `GOOGLE_CLOUD_PROJECT`            | Google Cloud project ID for Speech-to-Text API                              | -                   |
-| `GOOGLE_APPLICATION_CREDENTIALS`  | JSON key for Google Cloud service account                                   | -                   |
-| `GOOGLE_SPEECH_MODEL`             | Speech recognition model (e.g., 'chirp_2')                                  | chirp_2             |
-| `GOOGLE_TRANSLATION_MODEL`        | Google Gemini model for translation                                         | -                   |
-| `GEMINI_API_KEY`                  | API key for Google Gemini                                                   | -                   |
-| `GENESYS_API_KEY`                 | API key for Genesys Cloud Transcription Connector                           | -                   |
-| `GENESYS_ORG_ID`                  | Genesys Cloud organization ID                                               | -                   |
-| `DEBUG`                           | Set to "true" for increased logging granularity                             | false               |
-| `SUPPORTED_LANGUAGES`             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | es-ES,it-IT   |
-| `ENABLE_GEMINI`                   | Set to "true" to enable Gemini translation; "false" to disable translation   | true                |
-
-
----
+| Variable | Description | Default |
+|----------|-------------|---------|
+| GOOGLE_CLOUD_PROJECT | Google Cloud project ID for Speech-to-Text API | - |
+| GOOGLE_APPLICATION_CREDENTIALS | JSON key for Google Cloud service account | - |
+| GOOGLE_SPEECH_MODEL | Speech recognition model (e.g., 'chirp_2') | chirp_2 |
+| GOOGLE_TRANSLATION_MODEL | Google Gemini model for translation | - |
+| GEMINI_API_KEY | API key for Google Gemini | - |
+| GENESYS_API_KEY | API key for Genesys Cloud Transcription Connector | - |
+| GENESYS_ORG_ID | Genesys Cloud organization ID | - |
+| DEBUG | Set to "true" for increased logging granularity | false |
+| SUPPORTED_LANGUAGES | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US") | es-ES,it-IT |

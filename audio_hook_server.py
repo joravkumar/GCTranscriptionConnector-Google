@@ -58,6 +58,9 @@ class AudioHookServer:
         self.input_language = "en-US"
         self.destination_language = "en-US"
 
+        # Translation enable flag from customConfig.enableTranslation
+        self.enable_translation = False
+
         # Streaming transcription for each channel
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
@@ -167,24 +170,24 @@ class AudioHookServer:
         elif msg_type == "close":
             await self.handle_close(msg)
         elif msg_type in ["update", "resume", "pause"]:
-            self.logger.debug(f"Ignoring message of type {msg_type}")
+            self.logger.debug(f"Ignoring message type {msg_type}")
         else:
             self.logger.debug(f"Ignoring unknown message type: {msg_type}")
 
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
 
-        # Set languages based on the open message:
-        # - input_language comes from customConfig.inputLanguage (for transcription)
-        # - destination_language comes from the "language" field (for translation)
-        if "customConfig" in msg["parameters"] and "inputLanguage" in msg["parameters"]["customConfig"]:
-            self.input_language = normalize_language_code(msg["parameters"]["customConfig"]["inputLanguage"])
-        else:
-            self.input_language = "en-US"
-        self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
+        # Extract customConfig from the open message
+        custom_config = msg["parameters"].get("customConfig", {})
 
-        # Set enable_translation based on customConfig.enableTranslation
-        self.enable_translation = msg["parameters"].get("customConfig", {}).get("enableTranslation", False)
+        # Set input_language from customConfig.inputLanguage, default to "en-US"
+        self.input_language = normalize_language_code(custom_config.get("inputLanguage", "en-US"))
+
+        # Set enable_translation from customConfig.enableTranslation, default to False
+        self.enable_translation = custom_config.get("enableTranslation", False)
+
+        # Set destination_language from the "language" field
+        self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -392,7 +395,7 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     source_lang = self.input_language
-                    # If translation is enabled, translate to destination language; otherwise, keep the transcript as is.
+                    # If translation is enabled, translate to destination language; otherwise, keep the transcript as is
                     if self.enable_translation:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)

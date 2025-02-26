@@ -54,7 +54,4 @@ GENESYS_BINARY_BURST_LIMIT = 25
 RATE_LIMIT_MAX_RETRIES = 3
 
 # Transcription Connector language support
-SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,it-IT")
-
-# New environment variable to enable/disable Gemini translation (true or false)
-ENABLE_GEMINI = os.getenv("ENABLE_GEMINI", "true").lower() == "true"
+SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "es-ES,it-IT,fr-FR,de-DE,ja-JP")

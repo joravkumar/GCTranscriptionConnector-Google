@@ -16,7 +16,7 @@ from config import (
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
     SUPPORTED_LANGUAGES,
-    ENABLE_GEMINI
+    GENESYS_ORG_ID
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
@@ -175,14 +175,30 @@ class AudioHookServer:
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
 
-        # Set languages based on the open message:
-        # - input_language comes from customConfig.inputLanguage (for transcription)
-        # - destination_language comes from the "language" field (for translation)
-        if "customConfig" in msg["parameters"] and "inputLanguage" in msg["parameters"]["customConfig"]:
-            self.input_language = normalize_language_code(msg["parameters"]["customConfig"]["inputLanguage"])
+        # Set languages and config from the open message
+        custom_config = msg["parameters"].get("customConfig", {})
+        if "inputLanguage" in custom_config:
+            self.input_language = normalize_language_code(custom_config["inputLanguage"])
         else:
             self.input_language = "en-US"
         self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
+
+        # Set per-session configuration from customConfig
+        self.debug = custom_config.get("enableServerDebugging", False)
+        self.enable_gemini = custom_config.get("enableTranslation", True)
+        gc_org_id = custom_config.get("GCOrgId")
+
+        # Validate GCOrgId against GENESYS_ORG_ID
+        if not gc_org_id or gc_org_id != GENESYS_ORG_ID:
+            self.logger.error(f"Invalid or missing GCOrgId: {gc_org_id}, expected {GENESYS_ORG_ID}")
+            await self.disconnect_session(reason="error", info="Invalid GCOrgId")
+            return
+
+        # Adjust session logger level based on debug setting
+        if self.debug:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -391,7 +407,7 @@ class AudioHookServer:
                     transcript_text = alt.transcript
                     source_lang = self.input_language
                     # If Gemini translation is enabled, translate to destination language; otherwise, keep the transcript as is.
-                    if ENABLE_GEMINI:
+                    if self.enable_gemini:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
                         if translated_text is None:

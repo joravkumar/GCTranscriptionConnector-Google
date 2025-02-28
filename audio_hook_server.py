@@ -52,6 +52,7 @@ class AudioHookServer:
         # Total samples processed for offset calculation
         self.total_samples = 0
 
+        # New language attributes:
         # input_language comes from customConfig.inputLanguage (for transcription)
         # destination_language comes from the "language" field (for translation)
         self.input_language = "en-US"
@@ -394,91 +395,94 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     source_lang = self.input_language
-                    
-                    # Determine transcript text and token language
+                    # If translation is enabled, translate to destination language; otherwise, keep the transcript as is
                     if self.enable_translation:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
                         if translated_text is None:
                             self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
-                            continue
-                        token_language = None  # Matches conversation language (dest_lang)
-                        translated_words = translated_text.split()
+                            continue  # Skip sending the event if translation failed
                     else:
+                        dest_lang = source_lang
                         translated_text = transcript_text
-                        token_language = self.input_language if self.input_language != self.destination_language else None
-                        translated_words = [word.word for word in alt.words]
 
-                    # Calculate transcript offset and duration
+                    # Calculate overall offset and duration from the original transcription
                     if alt.words:
-                        first_start = alt.words[0].start_offset.seconds + alt.words[0].start_offset.nanos / 1e9
-                        last_end = alt.words[-1].end_offset.seconds + alt.words[-1].end_offset.nanos / 1e9
-                        transcript_offset = first_start
-                        transcript_duration = last_end - first_start
-                        offset_str = f"PT{transcript_offset:.2f}S"
-                        duration_str = f"PT{transcript_duration:.2f}S"
+                        overall_start = alt.words[0].start_offset.total_seconds()
+                        overall_end = alt.words[-1].end_offset.total_seconds()
+                        overall_duration = overall_end - overall_start
                     else:
-                        transcript_offset = self.total_samples / 8000.0  # 8kHz sample rate
-                        transcript_duration = 0.0
-                        offset_str = f"PT{transcript_offset:.2f}S"
-                        duration_str = "PT0S"
+                        overall_start = self.total_samples / 8000.0  # Assuming 8kHz sample rate
+                        overall_duration = 0.0
 
-                    # Create tokens
-                    tokens = []
+                    offset_str = f"PT{overall_start:.2f}S"
+                    duration_str = f"PT{overall_duration:.2f}S"
+
+                    # Build tokens based on whether translation is enabled
                     if self.enable_translation:
-                        n = len(translated_words)
-                        if n > 0:
-                            token_duration = transcript_duration / n if transcript_duration > 0 else 0.0
-                            for i, word in enumerate(translated_words):
-                                token_offset = transcript_offset + i * token_duration
+                        # Split the translated text into individual words
+                        words_list = translated_text.split()
+                        if words_list and overall_duration > 0:
+                            per_word_duration = overall_duration / len(words_list)
+                            tokens = []
+                            for i, word in enumerate(words_list):
+                                token_offset = overall_start + i * per_word_duration
                                 tokens.append({
                                     "type": "word",
                                     "value": word,
                                     "confidence": alt.confidence,
                                     "offset": f"PT{token_offset:.2f}S",
-                                    "duration": f"PT{token_duration:.2f}S",
-                                    "language": token_language
+                                    "duration": f"PT{per_word_duration:.2f}S",
+                                    "language": dest_lang
                                 })
                         else:
-                            # Fallback for empty translation
-                            tokens.append({
+                            tokens = [{
                                 "type": "word",
                                 "value": translated_text,
                                 "confidence": alt.confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
-                                "language": token_language
-                            })
+                                "language": dest_lang
+                            }]
                     else:
+                        # Translation disabled: use the original word timings if available
                         if alt.words:
-                            for word in alt.words:
-                                word_start = word.start_offset.seconds + word.start_offset.nanos / 1e9
-                                word_end = word.end_offset.seconds + word.end_offset.nanos / 1e9
-                                word_duration = word_end - word_start
-                                word_confidence = word.confidence if word.confidence is not None else alt.confidence
+                            tokens = []
+                            for w in alt.words:
+                                token_offset = w.start_offset.total_seconds()
+                                token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
                                 tokens.append({
                                     "type": "word",
-                                    "value": word.word,
-                                    "confidence": word_confidence,
-                                    "offset": f"PT{word_start:.2f}S",
-                                    "duration": f"PT{word_duration:.2f}S",
-                                    "language": token_language
+                                    "value": w.word,
+                                    "confidence": w.confidence,
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{token_duration:.2f}S",
+                                    "language": dest_lang
                                 })
                         else:
-                            # Fallback for no word timings
-                            tokens.append({
+                            tokens = [{
                                 "type": "word",
-                                "value": translated_text,
+                                "value": transcript_text,
                                 "confidence": alt.confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
-                                "language": token_language
-                            })
+                                "language": dest_lang
+                            }]
 
-                    # Determine languages for alternatives
-                    languages = [] if self.enable_translation else ([self.input_language] if self.input_language != self.destination_language else [])
+                    alternative = {
+                        "confidence": alt.confidence,
+                        **({"languages": [dest_lang]} if self.enable_translation else {}),
+                        "interpretations": [
+                            {
+                                "type": "display",
+                                "transcript": translated_text,
+                                "tokens": tokens
+                            }
+                        ]
+                    }
 
-                    # Create transcript event
+                    channel_id = channel  # Integer channel index
+
                     transcript_event = {
                         "version": "2",
                         "type": "event",
@@ -491,22 +495,12 @@ class AudioHookServer:
                                     "type": "transcript",
                                     "data": {
                                         "id": str(uuid.uuid4()),
-                                        "channelId": channel,
+                                        "channelId": channel_id,
                                         "isFinal": result.is_final,
                                         "offset": offset_str,
                                         "duration": duration_str,
                                         "alternatives": [
-                                            {
-                                                "confidence": alt.confidence,
-                                                "languages": languages,
-                                                "interpretations": [
-                                                    {
-                                                        "type": "display",
-                                                        "transcript": translated_text,
-                                                        "tokens": tokens
-                                                    }
-                                                ]
-                                            }
+                                            alternative
                                         ]
                                     }
                                 }
@@ -519,7 +513,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)   
 
     async def _send_json(self, msg: dict):
         try:

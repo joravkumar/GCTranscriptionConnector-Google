@@ -208,7 +208,6 @@ When deploying this application on Digital Ocean App Platform, you'll need to co
 - **HTTP Request Routes**  
   - Route Path: `/audiohook`
   - Preserve Path Prefix: Enabled (check this option to ensure the path will remain `/audiohook` when forwarded to the component)
-  - CORS Configuration: Configure as needed for your environment
 
 - **Ports**  
   - Public HTTP Port: 443 (for HTTPS connections)

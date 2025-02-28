@@ -447,9 +447,10 @@ class AudioHookServer:
                         translated_text = transcript_text
 
                     # Calculate overall offset and duration from the original transcription
+                    adjustment_seconds = self.offset_adjustment / 8000.0
                     if alt.words:
-                        overall_start = alt.words[0].start_offset.total_seconds()
-                        overall_end = alt.words[-1].end_offset.total_seconds()
+                        overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
+                        overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
                         overall_duration = overall_end - overall_start
                     else:
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0  # Adjusted for control messages
@@ -489,7 +490,7 @@ class AudioHookServer:
                         if alt.words:
                             tokens = []
                             for w in alt.words:
-                                token_offset = w.start_offset.total_seconds()
+                                token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
                                 tokens.append({
                                     "type": "word",

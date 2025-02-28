@@ -420,15 +420,72 @@ class AudioHookServer:
                     
                     channel_id = channel  # Integer channel index
                     
-                    # Create a single token for the entire translated text
-                    tokens = [{
-                        "type": "word",
-                        "value": translated_text,
-                        "confidence": alt.confidence,
-                        "offset": offset,
-                        "duration": duration,
-                        "language": dest_lang
-                    }]
+                    # Create tokens based on whether translation is enabled or not
+                    if not self.enable_translation:
+                        # Translation disabled: use each word from transcription's alt.words if available, else fallback splitting transcript_text
+                        if alt.words:
+                            tokens = []
+                            for word in alt.words:
+                                if word.start_offset is not None and word.end_offset is not None:
+                                    token_offset = f"PT{word.start_offset.total_seconds():.2f}S"
+                                    token_duration = f"PT{(word.end_offset.total_seconds() - word.start_offset.total_seconds()):.2f}S"
+                                else:
+                                    token_offset = offset
+                                    token_duration = duration
+                                tokens.append({
+                                    "type": "word",
+                                    "value": word.word,
+                                    "confidence": word.confidence if word.confidence is not None else alt.confidence,
+                                    "offset": token_offset,
+                                    "duration": token_duration,
+                                    "language": dest_lang
+                                })
+                        else:
+                            # Fallback: split the transcript_text into words
+                            words_list = transcript_text.split()
+                            tokens = []
+                            for word in words_list:
+                                tokens.append({
+                                    "type": "word",
+                                    "value": word,
+                                    "confidence": alt.confidence,
+                                    "offset": offset,
+                                    "duration": duration,
+                                    "language": dest_lang
+                                })
+                    else:
+                        # Translation enabled: split translated_text into words and distribute timing if available
+                        words_list = translated_text.split()
+                        tokens = []
+                        if alt.words:
+                            first_start = alt.words[0].start_offset.total_seconds()
+                            last_end = alt.words[-1].end_offset.total_seconds()
+                            total_duration = last_end - first_start
+                            if len(words_list) > 0:
+                                per_word_duration = total_duration / len(words_list)
+                            else:
+                                per_word_duration = 0
+                            for idx, word in enumerate(words_list):
+                                token_offset_sec = first_start + idx * per_word_duration
+                                tokens.append({
+                                    "type": "word",
+                                    "value": word,
+                                    "confidence": alt.confidence,
+                                    "offset": f"PT{token_offset_sec:.2f}S",
+                                    "duration": f"PT{per_word_duration:.2f}S",
+                                    "language": dest_lang
+                                })
+                        else:
+                            # Fallback if no word timing is available: assign same offset and duration to all tokens
+                            for word in words_list:
+                                tokens.append({
+                                    "type": "word",
+                                    "value": word,
+                                    "confidence": alt.confidence,
+                                    "offset": offset,
+                                    "duration": duration,
+                                    "language": dest_lang
+                                })
                     
                     transcript_event = {
                         "version": "2",

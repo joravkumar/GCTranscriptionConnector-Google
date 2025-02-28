@@ -292,6 +292,27 @@ class AudioHookServer:
 
     async def handle_close(self, msg: dict):
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
+        # Stop new audio processing by stopping streaming for all channels
+        for transcription in self.streaming_transcriptions:
+            transcription.stop_streaming()
+
+        # Drain pending transcription responses before sending the closed message
+        self.logger.info("Draining pending transcription responses before sending closed message.")
+        drain_timeout = 5.0
+        start_time = time.time()
+        while time.time() - start_time < drain_timeout:
+            pending = False
+            for transcription in self.streaming_transcriptions:
+                for q in transcription.response_queues:
+                    if not q.empty():
+                        pending = True
+                        break
+                if pending:
+                    break
+            if not pending:
+                break
+            await asyncio.sleep(0.05)
+        self.logger.info("Pending transcription responses drained, proceeding to send closed message.")
 
         closed_msg = {
             "version": "2",
@@ -317,8 +338,6 @@ class AudioHookServer:
         )
 
         self.running = False
-        for transcription in self.streaming_transcriptions:
-            transcription.stop_streaming()
         for task in self.process_responses_tasks:
             task.cancel()
 

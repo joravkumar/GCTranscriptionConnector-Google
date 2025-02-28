@@ -51,6 +51,10 @@ class AudioHookServer:
 
         # Total samples processed for offset calculation
         self.total_samples = 0
+        # Offset adjustment for control messages (discarded/paused)
+        self.offset_adjustment = 0
+        # Timestamp when pause started, if any
+        self.pause_start_time = None
 
         # New language attributes:
         # input_language comes from customConfig.inputLanguage (for transcription)
@@ -169,10 +173,46 @@ class AudioHookServer:
             await self.handle_ping(msg)
         elif msg_type == "close":
             await self.handle_close(msg)
-        elif msg_type in ["update", "resume", "pause"]:
+        elif msg_type == "discarded":
+            await self.handle_discarded(msg)
+        elif msg_type == "paused":
+            await self.handle_paused(msg)
+        elif msg_type == "resumed":
+            await self.handle_resumed(msg)
+        elif msg_type in ["update"]:
             self.logger.debug(f"Ignoring message type {msg_type}")
         else:
             self.logger.debug(f"Ignoring unknown message type: {msg_type}")
+
+    async def handle_discarded(self, msg: dict):
+        discarded_duration_str = msg["parameters"].get("discarded")
+        if discarded_duration_str:
+            try:
+                gap = parse_iso8601_duration(discarded_duration_str)
+                gap_samples = int(gap * 8000)  # assuming 8kHz sample rate
+                self.offset_adjustment += gap_samples
+                self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment.")
+            except ValueError as e:
+                self.logger.warning(f"Failed to parse discarded duration '{discarded_duration_str}': {e}")
+        else:
+            self.logger.warning("Received 'discarded' message without 'discarded' parameter.")
+
+    async def handle_paused(self, msg: dict):
+        if self.pause_start_time is None:
+            self.pause_start_time = time.time()
+            self.logger.info("Handled 'paused' message: pause started.")
+        else:
+            self.logger.warning("Received 'paused' message while already paused.")
+
+    async def handle_resumed(self, msg: dict):
+        if self.pause_start_time is not None:
+            pause_duration = time.time() - self.pause_start_time
+            gap_samples = int(pause_duration * 8000)  # assuming 8kHz sample rate
+            self.offset_adjustment += gap_samples
+            self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment.")
+            self.pause_start_time = None
+        else:
+            self.logger.warning("Received 'resumed' message without a preceding 'paused' event.")
 
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
@@ -412,7 +452,7 @@ class AudioHookServer:
                         overall_end = alt.words[-1].end_offset.total_seconds()
                         overall_duration = overall_end - overall_start
                     else:
-                        overall_start = self.total_samples / 8000.0  # Assuming 8kHz sample rate
+                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0  # Adjusted for control messages
                         overall_duration = 0.0
 
                     offset_str = f"PT{overall_start:.2f}S"

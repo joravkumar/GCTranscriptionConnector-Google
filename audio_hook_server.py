@@ -445,21 +445,29 @@ class AudioHookServer:
                     else:
                         dest_lang = source_lang
                         translated_text = transcript_text
-
+    
                     # Calculate overall offset and duration from the original transcription
                     adjustment_seconds = self.offset_adjustment / 8000.0
-                    if alt.words:
+                    
+                    # Handle token creation differently based on model and whether we have word-level timestamps
+                    use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
+                        hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
+                    )
+                    
+                    if use_word_timings:
+                        # We have word-level timings (usually with Chirp 2)
                         overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
                         overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
                         overall_duration = overall_end - overall_start
                     else:
-                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0  # Adjusted for control messages
+                        # No word-level timings (could be Chirp model)
+                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
                         overall_duration = 0.0
-
+    
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
-
-                    # Build tokens based on whether translation is enabled
+    
+                    # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
                         # Split the translated text into individual words
                         words_list = translated_text.split()
@@ -487,20 +495,25 @@ class AudioHookServer:
                             }]
                     else:
                         # Translation disabled: use the original word timings if available
-                        if alt.words:
+                        if use_word_timings:
                             tokens = []
                             for w in alt.words:
                                 token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
+                                # Check if this word has a confidence score, if not use the alternative's confidence
+                                word_confidence = getattr(w, "confidence", None)
+                                if word_confidence is None:
+                                    word_confidence = alt.confidence
                                 tokens.append({
                                     "type": "word",
                                     "value": w.word,
-                                    "confidence": w.confidence,
+                                    "confidence": word_confidence,
                                     "offset": f"PT{token_offset:.2f}S",
                                     "duration": f"PT{token_duration:.2f}S",
                                     "language": dest_lang
                                 })
                         else:
+                            # For models without word-level timing, use the overall timing for the whole transcript
                             tokens = [{
                                 "type": "word",
                                 "value": transcript_text,
@@ -509,7 +522,7 @@ class AudioHookServer:
                                 "duration": duration_str,
                                 "language": dest_lang
                             }]
-
+    
                     alternative = {
                         "confidence": alt.confidence,
                         **({"languages": [dest_lang]} if self.enable_translation else {}),
@@ -521,9 +534,9 @@ class AudioHookServer:
                             }
                         ]
                     }
-
+    
                     channel_id = channel  # Integer channel index
-
+    
                     transcript_event = {
                         "version": "2",
                         "type": "event",
@@ -554,7 +567,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01)   
+                await asyncio.sleep(0.01)
 
     async def _send_json(self, msg: dict):
         try:

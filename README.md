@@ -58,7 +58,7 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
 
 ## Use Cases
 
-This connector is designed to support two primary use cases that address different needs in multilingual contact center environments:
+This connector is designed to support two primary use cases that address different needs in contact center environments:
 
 ### 1. Transcription Only (No Translation)
 

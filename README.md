@@ -310,6 +310,9 @@ All configurable parameters are defined in `config.py` and loaded from environme
 | DEBUG                           | Set to "true" for increased logging granularity                                               | false             |
 | SUPPORTED_LANGUAGES             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US")                   | es-ES,it-IT       |
 
+
+---
+
 ## Issues
 
 - **Random numbers in the transcription:**  

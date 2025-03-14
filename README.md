@@ -45,7 +45,7 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
    - Sends PCM16 audio to the Google Cloud Speech-to-Text API for transcription in the source language.
 
 5. **Translation via Google Gemini (Optional):**  
-   - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini (see 'enableTranslation' in 'Language Handling' section.
+   - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini (see 'enableTranslation' in 'Language Handling' section).
    - Uses structured output to ensure only the translated text is returned.
    - If disabled or not specified, the original transcript is returned without translation, using the input language.
 

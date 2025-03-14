@@ -74,7 +74,7 @@ The application is built around the following core components:
   - **Translation (Optional):** Uses Google Gemini with structured output to ensure only the translated text is returned. This step is performed only if `customConfig.enableTranslation` is set to true in the open message.
 
 - **Rate Limiting:**  
-  - Implements a custom rate limiter to prevent exceeding Genesys Cloud's messaging rate limits.
+  - Implements a custom rate limiter to prevent exceeding GC AudioHook's messaging rate limits.
   - Defined in `rate_limiter.py`.
 
 - **Environment Configuration:**  
@@ -309,3 +309,8 @@ All configurable parameters are defined in `config.py` and loaded from environme
 | GENESYS_ORG_ID                  | Genesys Cloud organization ID                                                                 | -                 |
 | DEBUG                           | Set to "true" for increased logging granularity                                               | false             |
 | SUPPORTED_LANGUAGES             | Comma-separated list of supported input languages (e.g., "es-ES,it-IT,en-US")                   | es-ES,it-IT       |
+
+## Issues
+
+- **Random numbers in the transcription:**  
+  - From time to time some arbitrary numbers show up in the transcription, totally unrelated to the conversation itself. It requires further investigation.

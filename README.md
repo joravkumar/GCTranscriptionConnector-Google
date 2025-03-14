@@ -12,6 +12,7 @@ The project is designed to be deployed on **Digital Ocean** (or a similar platfo
 - [Architecture](#architecture)
 - [Code Structure](#code-structure)
 - [Transcription and Translation Processing](#transcription-and-translation-processing)
+- [Supported Speech Models](#supported-speech-models)
 - [Language Handling](#language-handling)
 - [Deployment](#deployment)
   - [Digital Ocean App Platform Configuration](#digital-ocean-app-platform-configuration)
@@ -44,7 +45,7 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
    - Sends PCM16 audio to the Google Cloud Speech-to-Text API for transcription in the source language.
 
 5. **Translation via Google Gemini (Optional):**  
-   - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini.
+   - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini (see 'enableTranslation' in 'Language Handling' section.
    - Uses structured output to ensure only the translated text is returned.
    - If disabled or not specified, the original transcript is returned without translation, using the input language.
 
@@ -165,6 +166,34 @@ The application is built around the following core components:
     - Channel identifier (e.g., 0 for external, 1 for internal).
     - Transcribed text with adjusted offsets, duration, and confidence.
   - Sends the event to Genesys Cloud via WebSocket for conversation injection.
+
+---
+
+## Supported Speech Models
+
+This connector supports two Google Cloud Speech-to-Text models:
+
+- **Chirp 2 (Recommended):** 
+  - The most advanced model with full feature support, including:
+    - Streaming recognition
+    - Automatic capitalization
+    - Speech adaptation
+    - Profanity filter
+    - Language-specific translation
+    - Forced normalization
+    - Word-level confidence scores
+  - Provides higher accuracy transcription and detailed word-level confidence information
+
+- **Chirp:**
+  - More basic model with some limitations:
+    - Does not support word-level confidence scores (fixed value of 1.0 is used)
+    - Lacks advanced features like automatic capitalization, speech adaptation
+    - Uses default confidence value of 1.0 for all words
+    - Still provides word-level timing information
+
+The connector automatically adapts to whichever model is specified in the `GOOGLE_SPEECH_MODEL` environment variable, adjusting request parameters and response handling accordingly. When using Chirp, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
+
+**Note:** We recommend using Chirp 2 for optimal performance and accuracy. Use Chirp only if you have specific requirements or limitations that prevent using Chirp 2.
 
 ---
 
@@ -303,7 +332,7 @@ All configurable parameters are defined in `config.py` and loaded from environme
 |---------------------------------|-----------------------------------------------------------------------------------------------|-------------------|
 | GOOGLE_CLOUD_PROJECT            | Google Cloud project ID for Speech-to-Text API                                                | -                 |
 | GOOGLE_APPLICATION_CREDENTIALS  | JSON key for Google Cloud service account                                                    | -                 |
-| GOOGLE_SPEECH_MODEL             | Speech recognition model (e.g., 'chirp_2')                                                     | chirp_2           |
+| GOOGLE_SPEECH_MODEL             | Speech recognition model ('chirp_2' or 'chirp')                                               | chirp_2           |
 | GOOGLE_TRANSLATION_MODEL        | Google Gemini model for translation                                                           | -                 |
 | GEMINI_API_KEY                  | API key for Google Gemini                                                                     | -                 |
 | GENESYS_API_KEY                 | API key for Genesys Cloud Transcription Connector                                             | -                 |

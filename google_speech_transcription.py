@@ -67,6 +67,19 @@ class StreamingTranscription:
                 credentials=_credentials,
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
+            
+            # Configure features based on the selected speech model
+            features = cloud_speech.RecognitionFeatures(
+                enable_word_time_offsets=True
+            )
+            
+            # Only enable word confidence if using Chirp 2 model
+            if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                features.enable_word_confidence = True
+                self.logger.info(f"Using Chirp 2 model with word-level confidence enabled")
+            else:
+                self.logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence")
+            
             recognition_config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                     encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
@@ -75,10 +88,7 @@ class StreamingTranscription:
                 ),
                 language_codes=[self.language],
                 model=GOOGLE_SPEECH_MODEL,
-                features=cloud_speech.RecognitionFeatures(
-                    enable_word_time_offsets=True,
-                    enable_word_confidence=True
-                )
+                features=features
             )
 
             streaming_config = cloud_speech.StreamingRecognitionConfig(
@@ -173,16 +183,25 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 sample_rate_hertz=8000,
                 audio_channel_count=channels
             )
+            
+            # Configure features based on the selected speech model
+            features = cloud_speech.RecognitionFeatures(
+                enable_word_time_offsets=True
+            )
+            
+            # Only enable word confidence if using Chirp 2 model
+            if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                features.enable_word_confidence = True
+                logger.info(f"Using Chirp 2 model with word-level confidence enabled")
+            else:
+                logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence")
 
             # Build the recognition config
             config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=explicit_config,
                 language_codes=[source_language],
                 model=GOOGLE_SPEECH_MODEL,
-                features=cloud_speech.RecognitionFeatures(
-                    enable_word_time_offsets=True,
-                    enable_word_confidence=True
-                )
+                features=features
             )
             # If the source language is not English, add translation_config so that the transcript is translated to en-US.
             if source_language.lower() != "en-us":

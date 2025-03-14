@@ -470,6 +470,10 @@ class AudioHookServer:
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
     
+                    # Use Chirp 2's actual confidence or default to 1.0 for Chirp
+                    from config import GOOGLE_SPEECH_MODEL
+                    use_actual_confidence = GOOGLE_SPEECH_MODEL.lower() == 'chirp_2'
+                    
                     # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
                         # Split the translated text into individual words
@@ -479,19 +483,22 @@ class AudioHookServer:
                             tokens = []
                             for i, word in enumerate(words_list):
                                 token_offset = overall_start + i * per_word_duration
+                                # Always use 1.0 for Chirp or actual confidence for Chirp 2
+                                confidence = alt.confidence if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None else default_confidence
                                 tokens.append({
                                     "type": "word",
                                     "value": word,
-                                    "confidence": alt.confidence if hasattr(alt, "confidence") and alt.confidence is not None else default_confidence,
+                                    "confidence": confidence,
                                     "offset": f"PT{token_offset:.2f}S",
                                     "duration": f"PT{per_word_duration:.2f}S",
                                     "language": dest_lang
                                 })
                         else:
+                            confidence = alt.confidence if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None else default_confidence
                             tokens = [{
                                 "type": "word",
                                 "value": translated_text,
-                                "confidence": alt.confidence if hasattr(alt, "confidence") and alt.confidence is not None else default_confidence,
+                                "confidence": confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
                                 "language": dest_lang
@@ -507,9 +514,7 @@ class AudioHookServer:
                                 # For Chirp model, always use confidence = 1.0
                                 # For Chirp 2, use the actual confidence if available
                                 word_confidence = default_confidence
-                                if (hasattr(w, "confidence") and w.confidence is not None and 
-                                    from config import GOOGLE_SPEECH_MODEL
-                                    GOOGLE_SPEECH_MODEL.lower() == 'chirp_2'):
+                                if use_actual_confidence and hasattr(w, "confidence") and w.confidence is not None:
                                     word_confidence = w.confidence
                                     
                                 tokens.append({
@@ -535,9 +540,7 @@ class AudioHookServer:
                     # For Chirp, always use 1.0
                     # For Chirp 2, use the actual value if available
                     overall_confidence = default_confidence
-                    if (hasattr(alt, "confidence") and alt.confidence is not None and 
-                        from config import GOOGLE_SPEECH_MODEL
-                        GOOGLE_SPEECH_MODEL.lower() == 'chirp_2'):
+                    if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None:
                         overall_confidence = alt.confidence
                     
                     alternative = {

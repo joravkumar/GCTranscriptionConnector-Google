@@ -19,6 +19,7 @@ The project is designed to be deployed on **Digital Ocean** (or a similar platfo
 - [Usage](#usage)
 - [Error Handling and Logging](#error-handling-and-logging)
 - [Configuration](#configuration)
+- [Issues](#issues)
 
 ---
 

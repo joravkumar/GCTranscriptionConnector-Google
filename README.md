@@ -9,6 +9,7 @@ The project is designed to be deployed on **Digital Ocean** (or a similar platfo
 ## Table of Contents
 
 - [Overview](#overview)
+- [Use Cases](#use-cases)
 - [Architecture](#architecture)
 - [Code Structure](#code-structure)
 - [Transcription and Translation Processing](#transcription-and-translation-processing)
@@ -52,6 +53,52 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
 6. **Injection Back into Genesys Cloud:**  
    - Constructs a transcript event message with the (translated or original) text, including accurate offset and duration values adjusted for any control messages.
    - Sends the message back to Genesys Cloud via the WebSocket connection for injection into the conversation.
+
+---
+
+## Use Cases
+
+This connector is designed to support two primary use cases that address different needs in multilingual contact center environments:
+
+### 1. Transcription Only (No Translation)
+
+This use case is ideal when you need an specialized transcription engine different than the native options provided by Genesys Cloud or EVTS.
+
+**Key benefits:**
+- In this repo we are leveraging Google's advanced speech recognition capabilities
+- Supports languages that might not be available in Genesys' native transcription or EVTS
+
+**Configuration:**
+- Set `enableTranslation: false` or omit it in the `customConfig`
+- Ensure the `inputLanguage` in `customConfig` matches the language being spoken
+
+This approach maintains the original language throughout the conversation, making it suitable for environments where all systems (including analytics, agent assistance, etc.) support the source language.
+
+### 2. Transcription + Translation
+
+This use case is particularly valuable for enabling advanced Genesys features (like Copilot or Speech & Text Analytics) for languages that aren't directly supported by these tools.
+
+**Example scenario:**
+A contact center serves customers who speak a regionally-important language (such as Basque, Zulu, Welsh, etc.) that isn't directly supported by Genesys Copilot or STA. However, these tools do support a widely-used language in that same region (such as Spanish or English).
+
+**How it works:**
+1. The customer speaks in their preferred language (e.g., Basque)
+2. The connector transcribes the audio in the source language
+3. The text is translated to a widely-supported language (e.g., Spanish)
+4. Genesys Cloud receives the translated transcript, enabling tools like Copilot and STA to function
+
+**Key benefits:**
+- Extends advanced Genesys features to additional languages
+- Provides a more inclusive customer experience
+- Leverages existing agent language capabilities
+- Enables analytics and assistance tools across more languages
+
+**Configuration:**
+- Set `enableTranslation: true` in the `customConfig`
+- Set `inputLanguage` to the regionally-important language (source)
+- The `language` field in the message determines the target language for translation
+
+This use case is especially valuable in regions with linguistic diversity, where contact centers need to support regional languages while leveraging tools optimized for more widely-spoken languages.
 
 ---
 
@@ -173,27 +220,17 @@ The application is built around the following core components:
 
 This connector supports two Google Cloud Speech-to-Text models:
 
-- **Chirp 2 (Recommended):** 
+- **Chirp 2:** 
   - The most advanced model with full feature support, including:
-    - Streaming recognition
-    - Automatic capitalization
-    - Speech adaptation
-    - Profanity filter
-    - Language-specific translation
-    - Forced normalization
+    - Greater performance
     - Word-level confidence scores
-  - Provides higher accuracy transcription and detailed word-level confidence information
+    - Limited language support
 
 - **Chirp:**
-  - More basic model with some limitations:
+  - Good model with big language support:
     - Does not support word-level confidence scores (fixed value of 1.0 is used)
-    - Lacks advanced features like automatic capitalization, speech adaptation
-    - Uses default confidence value of 1.0 for all words
-    - Still provides word-level timing information
 
 The connector automatically adapts to whichever model is specified in the `GOOGLE_SPEECH_MODEL` environment variable, adjusting request parameters and response handling accordingly. When using Chirp, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
-
-**Note:** We recommend using Chirp 2 for optimal performance and accuracy. Use Chirp only if you have specific requirements or limitations that prevent using Chirp 2.
 
 ---
 

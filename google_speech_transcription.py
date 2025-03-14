@@ -68,17 +68,17 @@ class StreamingTranscription:
                 client_options=ClientOptions(api_endpoint="us-central1-speech.googleapis.com")
             )
             
-            # Configure features based on the selected speech model
+            # Set up features based on model capabilities
             features = cloud_speech.RecognitionFeatures(
                 enable_word_time_offsets=True
             )
             
-            # Only enable word confidence if using Chirp 2 model
+            # Only enable word confidence if using Chirp 2
             if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
                 features.enable_word_confidence = True
                 self.logger.info(f"Using Chirp 2 model with word-level confidence enabled")
             else:
-                self.logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence")
+                self.logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence - will use default confidence of 1.0")
             
             recognition_config = cloud_speech.RecognitionConfig(
                 explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
@@ -184,17 +184,17 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 audio_channel_count=channels
             )
             
-            # Configure features based on the selected speech model
+            # Configure features based on which model we're using
             features = cloud_speech.RecognitionFeatures(
                 enable_word_time_offsets=True
             )
             
-            # Only enable word confidence if using Chirp 2 model
+            # Only enable word confidence with Chirp 2
             if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
                 features.enable_word_confidence = True
                 logger.info(f"Using Chirp 2 model with word-level confidence enabled")
             else:
-                logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence")
+                logger.info(f"Using {GOOGLE_SPEECH_MODEL} model without word-level confidence - will use default confidence of 1.0")
 
             # Build the recognition config
             config = cloud_speech.RecognitionConfig(
@@ -239,15 +239,27 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                 start = word.start_offset.total_seconds()
                             if word.end_offset is not None:
                                 end = word.end_offset.total_seconds()
+                            
+                            # Use 1.0 as confidence for Chirp model or if confidence is not provided
+                            confidence = 1.0
+                            if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                                confidence = word.confidence if word.confidence is not None else 1.0
+                                
                             words_list.append({
                                 "word": word.word,
                                 "start_time": start,
                                 "end_time": end,
-                                "confidence": word.confidence if word.confidence is not None else 1.0
+                                "confidence": confidence
                             })
+                    
+                    # Use 1.0 as overall confidence for Chirp model or if confidence is not provided
+                    overall_confidence = 1.0
+                    if GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                        overall_confidence = alt.confidence if alt.confidence is not None else 1.0
+                        
                     result_data = {
                         "transcript": alt.transcript,
-                        "confidence": alt.confidence if alt.confidence is not None else 1.0,
+                        "confidence": overall_confidence,
                         "words": words_list
                     }
                     break

@@ -223,12 +223,14 @@ This connector supports two Google Cloud Speech-to-Text models:
 - **Chirp 2:** 
   - The most advanced model with full feature support, including:
     - Greater performance
+    - Faster
     - Word-level confidence scores
     - Limited language support
 
 - **Chirp:**
   - Good model with big language support:
     - Does not support word-level confidence scores (fixed value of 1.0 is used)
+    - Slower, a bit more lag to get the transcript back into GC
 
 The connector automatically adapts to whichever model is specified in the `GOOGLE_SPEECH_MODEL` environment variable, adjusting request parameters and response handling accordingly. When using Chirp, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
 

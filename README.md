@@ -1,8 +1,8 @@
 # Genesys AudioHook & Transcription Connector Server & LLM Translation
 
-This repository contains a production-ready implementation of a Genesys AudioHook & Transcription Connector server that processes real-time audio streams for transcription using the **Google Cloud Speech-to-Text API** and translation using **Google Gemini**. The transcribed (and optionally translated) text is then injected back into Genesys Cloud via event messages. This server is designed to meet the Genesys AudioHook protocol requirements and supports essential transactions such as session establishment, audio streaming, ping/pong heartbeats, and clean disconnection.
+This repository contains a production-ready implementation of a Genesys AudioHook & Transcription Connector server that processes real-time audio streams for transcription using either **Google Cloud Speech-to-Text API** or **OpenAI Speech-to-Text API** and translation using **Google Gemini**. The transcribed (and optionally translated) text is then injected back into Genesys Cloud via event messages. This server is designed to meet the Genesys AudioHook protocol requirements and supports essential transactions such as session establishment, audio streaming, ping/pong heartbeats, and clean disconnection.
 
-The project is designed to be deployed on **Digital Ocean** (or a similar platform) and integrates with **Google Cloud** for transcription and **Google Gemini** for translation.
+The project is designed to be deployed on **Digital Ocean** (or a similar platform) and integrates with **Google Cloud** or **OpenAI** for transcription and **Google Gemini** for translation.
 
 ---
 
@@ -42,8 +42,9 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
    - Converts audio frames from PCMU (u-law) to PCM16 using the Python `audioop` module.
    - **Control Message Handling:** The server processes control messages—such as "paused", "discarded", and "resumed"—to adjust the effective audio timeline. This ensures that the computed offsets for transcription events exclude any periods where audio was lost or intentionally paused, aligning with the Genesys AudioHook protocol requirements.
 
-4. **Transcription via Google Cloud Speech-to-Text:**  
-   - Sends PCM16 audio to the Google Cloud Speech-to-Text API for transcription in the source language.
+4. **Transcription via Google Cloud Speech-to-Text or OpenAI Speech-to-Text:**  
+   - Sends PCM16 audio to either Google Cloud Speech-to-Text API or OpenAI's Speech-to-Text API for transcription in the source language.
+   - The Speech provider is configurable via the `SPEECH_PROVIDER` environment variable.
 
 5. **Translation via Google Gemini (Optional):**  
    - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini (see 'enableTranslation' in 'Language Handling' section).
@@ -65,7 +66,7 @@ This connector is designed to support two primary use cases that address differe
 This use case is ideal when you need an specialized transcription engine different than the native options provided by Genesys Cloud or EVTS.
 
 **Key benefits:**
-- In this repo we are leveraging Google's advanced speech recognition capabilities
+- Leverage either Google's or OpenAI's advanced speech recognition capabilities
 - Supports languages that might not be available in Genesys' native transcription or EVTS
 
 **Configuration:**
@@ -115,11 +116,13 @@ The application is built around the following core components:
 
 - **Audio Processing:**  
   - Converts audio frames from PCMU to PCM16 using `audioop`.
-  - Feeds PCM16 audio to Google Cloud Speech-to-Text for transcription.
+  - Feeds PCM16 audio to either Google Cloud Speech-to-Text or OpenAI Speech-to-Text for transcription.
   - Optionally translates transcribed text using Google Gemini.
 
 - **Transcription and Translation:**  
-  - **Transcription:** Uses Google Cloud Speech-to-Text API with streaming recognition for real-time transcription.
+  - **Transcription:** Uses either:
+    - Google Cloud Speech-to-Text API with streaming recognition for real-time transcription.
+    - OpenAI Speech-to-Text API with buffered streaming for real-time transcription.
   - **Translation (Optional):** Uses Google Gemini with structured output to ensure only the translated text is returned. This step is performed only if `customConfig.enableTranslation` is set to true in the open message.
 
 - **Rate Limiting:**  
@@ -127,7 +130,7 @@ The application is built around the following core components:
   - Defined in `rate_limiter.py`.
 
 - **Environment Configuration:**  
-  - Loads configurations (API keys, Google Cloud settings, rate limits, supported languages, etc.) from environment variables.
+  - Loads configurations (API keys, Google Cloud settings, OpenAI settings, rate limits, supported languages, etc.) from environment variables.
   - Managed in `config.py`.
 
 ---
@@ -158,6 +161,11 @@ The application is built around the following core components:
   Handles audio conversion from PCMU to PCM16 and feeds it to the API.
   Includes normalize_language_code for BCP-47 language code normalization.
 
+- **openai_speech_transcription.py**  
+  Implements the StreamingTranscription class for real-time transcription using OpenAI's Speech-to-Text API.
+  Handles audio conversion, buffering, and sending to OpenAI's API.
+  Returns responses in a format compatible with the existing code structure.
+
 - **google_gemini_translation.py**  
   Implements the translate_with_gemini function for translating text using Google Gemini.
   Uses structured output (via Pydantic) to ensure only the translation is returned.
@@ -169,7 +177,7 @@ The application is built around the following core components:
 
 - **config.py**  
   Loads all configuration variables from environment variables.
-  Includes settings for Google Cloud, Google Gemini, Genesys, rate limiting, and supported languages.
+  Includes settings for Google Cloud, OpenAI, Google Gemini, Genesys, rate limiting, and supported languages.
 
 - **utils.py**  
   Contains helper functions:
@@ -196,9 +204,11 @@ The application is built around the following core components:
   - These messages adjust an internal offset (tracked as processed audio samples) so that transcription offsets and durations accurately reflect only the audio that was received (excluding any gaps due to pauses or audio loss).
 
 - **Transcription:**  
-  - Uses Google Cloud Speech-to-Text API with streaming recognition.
+  - Uses either:
+    - Google Cloud Speech-to-Text API with streaming recognition.
+    - OpenAI Speech-to-Text API with buffered streaming.
   - Feeds PCM16 audio to `StreamingTranscription` instances (one per channel).
-  - Retrieves transcription results with word-level timing and confidence scores.
+  - Retrieves transcription results with word-level timing and confidence scores when available.
   - Adjusts calculated offsets by subtracting the cumulative gap from control messages.
 
 - **Translation (Optional):**  
@@ -218,8 +228,9 @@ The application is built around the following core components:
 
 ## Supported Speech Models
 
-This connector supports two Google Cloud Speech-to-Text models:
+This connector supports two speech recognition providers:
 
+### Google Cloud Speech-to-Text
 - **Chirp 2:** 
   - The most advanced model with full feature support, including:
     - Greater performance
@@ -228,18 +239,28 @@ This connector supports two Google Cloud Speech-to-Text models:
     - Limited language support
 
 - **Chirp:**
-  - Good model with big language support:
+  - Good model with broad language support:
     - Does not support word-level confidence scores (fixed value of 1.0 is used)
     - Slower, a bit more lag to get the transcript back into GC
 
-The connector automatically adapts to whichever model is specified in the `GOOGLE_SPEECH_MODEL` environment variable, adjusting request parameters and response handling accordingly. When using Chirp, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
+### OpenAI Speech-to-Text
+- **gpt-4o-mini-transcribe:** 
+  - Default model, balancing speed and accuracy
+  - Limited parameter support (no timestamps)
+  - Supported formats: json or text only
+
+- **gpt-4o-transcribe:**
+  - Higher quality model for more accurate transcriptions
+  - Limited parameter support (no timestamps)
+  - Supported formats: json or text only
+
+The connector automatically adapts to whichever provider and model is specified in the environment variables, adjusting request parameters and response handling accordingly. When using models without word-level confidence, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
 
 ---
 
 ## Language Handling
 
 - **Input Language (Source):**  
-  - Chirp 2, the default Google model we use for transcription, doesn't support auto language detection. That is why you must explicitly provide the input language.
   - Determined from the `customConfig.inputLanguage` field in the "open" message received from Genesys Cloud. For example:
     ```json
     {
@@ -247,7 +268,7 @@ The connector automatically adapts to whichever model is specified in the `GOOGL
       "enableTranslation": true
     }
     ```
-  - Used for transcription via Google Cloud Speech-to-Text.
+  - Used for transcription via Google Cloud Speech-to-Text or OpenAI Speech-to-Text.
   - Defaults to "en-US" if not provided.
   - Normalized to BCP-47 format using `normalize_language_code`.
 
@@ -257,7 +278,7 @@ The connector automatically adapts to whichever model is specified in the `GOOGL
   - Normalized to BCP-47 format.
 
 - **Supported Languages:**  
-  - Defined in the `SUPPORTED_LANGUAGES` environment variable (comma-separated, e.g., "es-ES,it-IT,en-US"). They must be supported by the Google model we are leveraging (for Chirp 2, see: [Google Cloud Speech-to-Text Chirp 2 Model](https://cloud.google.com/speech-to-text/v2/docs/chirp_2-model)).
+  - Defined in the `SUPPORTED_LANGUAGES` environment variable (comma-separated, e.g., "es-ES,it-IT,en-US").
   - Sent to Genesys Cloud in the "opened" message for probe connections.
 
 - **Translation Toggle:**  
@@ -268,7 +289,7 @@ The connector automatically adapts to whichever model is specified in the `GOOGL
 
 ## Deployment
 
-This project is designed to be deployed on Digital Ocean (or a similar platform). It integrates with Google Cloud for transcription (Speech-to-Text API) and Google Gemini for translation.
+This project is designed to be deployed on Digital Ocean (or a similar platform). It integrates with Google Cloud or OpenAI for transcription (Speech-to-Text API) and Google Gemini for translation.
 
 ### Digital Ocean App Platform Configuration
 
@@ -309,10 +330,15 @@ When configuring your Genesys Cloud AudioHook integration, use the full URL prov
   - python-dotenv
   - google-cloud-speech
   - google-generativeai
+  - openai
 
 - **Google Cloud Account:**  
-  - Required for Google Cloud Speech-to-Text API access.
+  - Required for Google Cloud Speech-to-Text API access if using Google as the speech provider.
   - Set up a service account and download the JSON key.
+
+- **OpenAI API Key:**  
+  - Required for OpenAI Speech-to-Text API access if using OpenAI as the speech provider.
+  - Obtain from OpenAI's platform.
 
 - **Google Gemini API Key:**  
   - Required for translation services.
@@ -369,11 +395,14 @@ All configurable parameters are defined in `config.py` and loaded from environme
 
 | Variable                        | Description                                                                                   | Default           |
 |---------------------------------|-----------------------------------------------------------------------------------------------|-------------------|
-| GOOGLE_CLOUD_PROJECT            | Google Cloud project ID for Speech-to-Text API                                                | -                 |
-| GOOGLE_APPLICATION_CREDENTIALS  | JSON key for Google Cloud service account                                                    | -                 |
-| GOOGLE_SPEECH_MODEL             | Speech recognition model ('chirp_2' or 'chirp')                                               | chirp_2           |
+| GOOGLE_CLOUD_PROJECT            | Google Cloud project ID for Speech-to-Text API (required for Google provider)                 | -                 |
+| GOOGLE_APPLICATION_CREDENTIALS  | JSON key for Google Cloud service account (required for Google provider)                      | -                 |
+| GOOGLE_SPEECH_MODEL             | Google Speech recognition model ('chirp_2' or 'chirp')                                        | chirp_2           |
 | GOOGLE_TRANSLATION_MODEL        | Google Gemini model for translation                                                           | -                 |
 | GEMINI_API_KEY                  | API key for Google Gemini                                                                     | -                 |
+| OPENAI_API_KEY                  | API key for OpenAI (required for OpenAI provider)                                             | -                 |
+| OPENAI_SPEECH_MODEL             | OpenAI Speech-to-Text model                                                                   | gpt-4o-mini-transcribe |
+| SPEECH_PROVIDER                 | Which speech provider to use ('google' or 'openai')                                           | google            |
 | GENESYS_API_KEY                 | API key for Genesys Cloud Transcription Connector                                             | -                 |
 | GENESYS_ORG_ID                  | Genesys Cloud organization ID                                                                 | -                 |
 | DEBUG                           | Set to "true" for increased logging granularity                                               | false             |

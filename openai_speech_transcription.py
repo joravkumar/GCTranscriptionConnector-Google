@@ -18,8 +18,11 @@ from config import (
 )
 from language_mapping import normalize_language_code, get_openai_language_code
 
+class MockResult:
+    def __init__(self):
+        self.results = []
+
 class StreamingTranscription:
-    # Class-level cache to remember which models support which formats
     model_format_support = {}
     
     def __init__(self, language: str, channels: int, logger):
@@ -37,6 +40,7 @@ class StreamingTranscription:
         self.chunk_size = 24000
         self.last_chunk_time = [time.time() for _ in range(channels)]
         self.max_delay = 2.0
+        self.silence_threshold = 500  # RMS threshold for silence detection
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -76,6 +80,14 @@ class StreamingTranscription:
                         
                         if len(self.accumulated_audio[channel]) > 0:
                             audio_data = bytes(self.accumulated_audio[channel])
+                            
+                            # Check if the audio is silent
+                            rms = audioop.rms(audio_data, 2)
+                            if rms < self.silence_threshold:
+                                # Skip processing silent audio
+                                self.accumulated_audio[channel] = bytearray()
+                                self.last_chunk_time[channel] = current_time
+                                continue
                             
                             self.accumulated_audio[channel] = bytearray()
                             self.last_chunk_time[channel] = current_time
@@ -132,12 +144,25 @@ class StreamingTranscription:
             self.logger.info(f"Transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
             self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
             
+            # Check audio for silence
+            with open(file_path, 'rb') as f:
+                audio_data = f.read()
+                
+            # Get the audio data part (after WAV header)
+            audio_content = audio_data[44:]  # Skip WAV header
+            
+            # Check RMS value
+            rms = audioop.rms(audio_content, 2)
+            if rms < self.silence_threshold:
+                self.logger.info(f"Audio is silent (RMS: {rms}), skipping transcription")
+                return MockResult()
+            
             url = "https://api.openai.com/v1/audio/transcriptions"
             headers = {
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
-            # Check if we already know this model doesn't support verbose_json
+            # Check if we already know this model's capabilities
             if OPENAI_SPEECH_MODEL in self.model_format_support and 'verbose_json' not in self.model_format_support[OPENAI_SPEECH_MODEL]:
                 self.logger.debug(f"Using json format for model {OPENAI_SPEECH_MODEL} (cached capability)")
                 return await self.transcribe_audio_simple(file_path, channel)
@@ -163,12 +188,17 @@ class StreamingTranscription:
                                 result_json = await response.json()
                                 self.logger.debug(f"OpenAI transcription result: {result_json}")
                                 
+                                # Check if the response is empty or contains only whitespace
+                                if not result_json.get('text') or result_json.get('text').strip() == "":
+                                    self.logger.info("OpenAI returned empty transcript, returning empty result")
+                                    return MockResult()
+                                
                                 return self.convert_to_google_format(result_json, channel)
                             else:
                                 error_text = await response.text()
                                 error_msg = f"OpenAI API error: {response.status} - {error_text}"
                                 self.logger.error(error_msg)
-                                raise Exception(error_msg)
+                                return MockResult()
                 except Exception as e:
                     error_text = str(e)
                     if ("verbose_json" in error_text and "not compatible" in error_text) or \
@@ -182,16 +212,30 @@ class StreamingTranscription:
                         self.logger.warning(f"Model {OPENAI_SPEECH_MODEL} doesn't support verbose_json, falling back to json format")
                         return await self.transcribe_audio_simple(file_path, channel)
                     else:
-                        raise e
+                        self.logger.error(f"Error in OpenAI transcription: {e}")
+                        return MockResult()
         except Exception as e:
             self.logger.error(f"Error in OpenAI transcription: {e}")
-            raise e
+            return MockResult()
 
     async def transcribe_audio_simple(self, file_path, channel):
         try:
             openai_lang = self.openai_language
             self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
             self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
+            
+            # Check audio for silence
+            with open(file_path, 'rb') as f:
+                audio_data = f.read()
+                
+            # Get the audio data part (after WAV header)
+            audio_content = audio_data[44:]  # Skip WAV header
+            
+            # Check RMS value
+            rms = audioop.rms(audio_content, 2)
+            if rms < self.silence_threshold:
+                self.logger.info(f"Audio is silent (RMS: {rms}), skipping transcription")
+                return MockResult()
             
             url = "https://api.openai.com/v1/audio/transcriptions"
             headers = {
@@ -220,15 +264,20 @@ class StreamingTranscription:
                             result_json = await response.json()
                             self.logger.debug(f"OpenAI simple transcription result: {result_json}")
                             
+                            # Check if the response is empty or contains only whitespace
+                            if not result_json.get('text') or result_json.get('text').strip() == "":
+                                self.logger.info("OpenAI returned empty transcript, returning empty result")
+                                return MockResult()
+                            
                             return self.convert_simple_to_google_format(result_json, channel)
                         else:
                             error_text = await response.text()
                             error_msg = f"OpenAI API error: {response.status} - {error_text}"
                             self.logger.error(error_msg)
-                            raise Exception(error_msg)
+                            return MockResult()
         except Exception as e:
             self.logger.error(f"Error in simple OpenAI transcription: {e}")
-            raise e
+            return MockResult()
 
     def convert_to_google_format(self, openai_response, channel):
         from google.cloud.speech_v2 import SpeechClient
@@ -237,7 +286,7 @@ class StreamingTranscription:
         mock_result = type('MockResult', (), {})
         mock_result.results = []
         
-        if 'text' in openai_response:
+        if 'text' in openai_response and openai_response['text'].strip():
             result = type('Result', (), {})
             result.alternatives = []
             result.is_final = True
@@ -281,7 +330,7 @@ class StreamingTranscription:
         mock_result = type('MockResult', (), {})
         mock_result.results = []
         
-        if 'text' in openai_response:
+        if 'text' in openai_response and openai_response['text'].strip():
             result = type('Result', (), {})
             result.alternatives = []
             result.is_final = True
@@ -344,7 +393,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         rms_value = audioop.rms(pcm16_data, 2)
         logger.debug(f"PCM16 RMS value: {rms_value}")
         
-        if rms_value < 50:
+        if rms_value < 500:  # Higher threshold for silence detection
             logger.info("PCM16 RMS value below threshold, skipping transcription")
             return {"transcript": "", "words": []}
 
@@ -386,16 +435,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
-            # Check if we already know this model doesn't support verbose_json
-            if hasattr(StreamingTranscription, 'model_format_support') and \
-               OPENAI_SPEECH_MODEL in StreamingTranscription.model_format_support and \
-               'verbose_json' not in StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL]:
-                # Skip verbose_json attempt and go straight to json format
-                logger.debug(f"Using json format for model {OPENAI_SPEECH_MODEL} (cached capability)")
-                response_format = 'json'
-            else:
-                # Try verbose_json format first
-                response_format = 'verbose_json'
+            response_format = 'json' # More reliable to use json format directly
             
             try:
                 form_data = aiohttp.FormData()
@@ -411,27 +451,30 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
                         if response.status == 200:
-                            # Cache successful format support
-                            if not hasattr(StreamingTranscription, 'model_format_support'):
-                                StreamingTranscription.model_format_support = {}
-                            if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
-                                StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
-                            if response_format not in StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL]:
-                                StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].append(response_format)
-                            
                             result_json = await response.json()
                             logger.debug(f"OpenAI transcription result: {result_json}")
                             
-                            transcript = result_json.get('text', '')
-                            words_list = []
+                            transcript = result_json.get('text', '').strip()
                             
-                            if 'words' in result_json:
-                                for word_info in result_json['words']:
+                            # If transcript is empty, return empty result
+                            if not transcript:
+                                return {
+                                    "transcript": "",
+                                    "confidence": 0.0,
+                                    "words": []
+                                }
+                            
+                            words_list = []
+                            words = transcript.split()
+                            
+                            if words:
+                                avg_duration = 2.0 / len(words)
+                                for i, word_text in enumerate(words):
                                     words_list.append({
-                                        "word": word_info.get('word', ''),
-                                        "start_time": word_info.get('start', 0),
-                                        "end_time": word_info.get('end', 0),
-                                        "confidence": word_info.get('confidence', 0.9)
+                                        "word": word_text,
+                                        "start_time": i * avg_duration,
+                                        "end_time": (i + 1) * avg_duration,
+                                        "confidence": 0.9
                                     })
                             
                             return {
@@ -445,70 +488,8 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                             return {"transcript": "", "words": []}
             
             except Exception as e:
-                error_text = str(e)
-                if (response_format == 'verbose_json' and 
-                    (("verbose_json" in error_text and "not compatible" in error_text) or
-                     ("verbose_json" in error_text and "unsupported_value" in error_text))):
-                    # Update model format support cache
-                    if not hasattr(StreamingTranscription, 'model_format_support'):
-                        StreamingTranscription.model_format_support = {}
-                    if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
-                        StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
-                    if 'verbose_json' in StreamingTranscription.model_format_support.get(OPENAI_SPEECH_MODEL, []):
-                        StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].remove('verbose_json')
-                    
-                    logger.warning(f"Model {OPENAI_SPEECH_MODEL} doesn't support verbose_json, falling back to json format")
-                    
-                    form_data = aiohttp.FormData()
-                    with open(file_path, 'rb') as audio_file:
-                        form_data.add_field('file', 
-                                          audio_file, 
-                                          filename=os.path.basename(file_path),
-                                          content_type='audio/wav')
-                    form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                    form_data.add_field('response_format', 'json')
-                    form_data.add_field('language', openai_language)
-                    
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, headers=headers, data=form_data) as response:
-                            if response.status == 200:
-                                # Update model format support cache
-                                if not hasattr(StreamingTranscription, 'model_format_support'):
-                                    StreamingTranscription.model_format_support = {}
-                                if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
-                                    StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
-                                if 'json' not in StreamingTranscription.model_format_support.get(OPENAI_SPEECH_MODEL, []):
-                                    StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].append('json')
-                                
-                                result_json = await response.json()
-                                logger.debug(f"OpenAI simple transcription result: {result_json}")
-                                
-                                transcript = result_json.get('text', '')
-                                
-                                words = transcript.split()
-                                words_list = []
-                                
-                                if words:
-                                    avg_duration = 2.0 / len(words)
-                                    for i, word_text in enumerate(words):
-                                        words_list.append({
-                                            "word": word_text,
-                                            "start_time": i * avg_duration,
-                                            "end_time": (i + 1) * avg_duration,
-                                            "confidence": 0.9
-                                        })
-                                
-                                return {
-                                    "transcript": transcript,
-                                    "confidence": 0.9,
-                                    "words": words_list
-                                }
-                            else:
-                                error_text = await response.text()
-                                logger.error(f"OpenAI API error: {response.status} - {error_text}")
-                                return {"transcript": "", "words": []}
-                else:
-                    raise e
+                logger.error(f"Error in OpenAI API call: {str(e)}")
+                return {"transcript": "", "words": []}
                 
         finally:
             if os.path.exists(file_path):

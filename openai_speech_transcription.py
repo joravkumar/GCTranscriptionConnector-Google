@@ -19,6 +19,9 @@ from config import (
 from language_mapping import normalize_language_code, get_openai_language_code
 
 class StreamingTranscription:
+    # Class-level cache to remember which models support which formats
+    model_format_support = {}
+    
     def __init__(self, language: str, channels: int, logger):
         self.logger = logger
         self.language = normalize_language_code(language)
@@ -134,6 +137,11 @@ class StreamingTranscription:
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
+            # Check if we already know this model doesn't support verbose_json
+            if OPENAI_SPEECH_MODEL in self.model_format_support and 'verbose_json' not in self.model_format_support[OPENAI_SPEECH_MODEL]:
+                self.logger.debug(f"Using json format for model {OPENAI_SPEECH_MODEL} (cached capability)")
+                return await self.transcribe_audio_simple(file_path, channel)
+            
             with open(file_path, 'rb') as audio_file:
                 form_data = aiohttp.FormData()
                 form_data.add_field('file', 
@@ -148,6 +156,10 @@ class StreamingTranscription:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, headers=headers, data=form_data) as response:
                             if response.status == 200:
+                                # Cache successful format support
+                                if OPENAI_SPEECH_MODEL not in self.model_format_support:
+                                    self.model_format_support[OPENAI_SPEECH_MODEL] = ['verbose_json']
+                                
                                 result_json = await response.json()
                                 self.logger.debug(f"OpenAI transcription result: {result_json}")
                                 
@@ -158,8 +170,15 @@ class StreamingTranscription:
                                 self.logger.error(error_msg)
                                 raise Exception(error_msg)
                 except Exception as e:
-                    if "verbose_json" in str(e) and (OPENAI_SPEECH_MODEL == "gpt-4o-mini-transcribe" or 
-                                                    OPENAI_SPEECH_MODEL == "gpt-4o-transcribe"):
+                    error_text = str(e)
+                    if ("verbose_json" in error_text and "not compatible" in error_text) or \
+                       ("verbose_json" in error_text and "unsupported_value" in error_text):
+                        # Update model format support cache
+                        if OPENAI_SPEECH_MODEL not in self.model_format_support:
+                            self.model_format_support[OPENAI_SPEECH_MODEL] = []
+                        if 'verbose_json' in self.model_format_support.get(OPENAI_SPEECH_MODEL, []):
+                            self.model_format_support[OPENAI_SPEECH_MODEL].remove('verbose_json')
+                        
                         self.logger.warning(f"Model {OPENAI_SPEECH_MODEL} doesn't support verbose_json, falling back to json format")
                         return await self.transcribe_audio_simple(file_path, channel)
                     else:
@@ -192,6 +211,12 @@ class StreamingTranscription:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
                         if response.status == 200:
+                            # Update model format support cache
+                            if OPENAI_SPEECH_MODEL not in self.model_format_support:
+                                self.model_format_support[OPENAI_SPEECH_MODEL] = []
+                            if 'json' not in self.model_format_support.get(OPENAI_SPEECH_MODEL, []):
+                                self.model_format_support[OPENAI_SPEECH_MODEL].append('json')
+                            
                             result_json = await response.json()
                             self.logger.debug(f"OpenAI simple transcription result: {result_json}")
                             
@@ -361,6 +386,17 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
+            # Check if we already know this model doesn't support verbose_json
+            if hasattr(StreamingTranscription, 'model_format_support') and \
+               OPENAI_SPEECH_MODEL in StreamingTranscription.model_format_support and \
+               'verbose_json' not in StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL]:
+                # Skip verbose_json attempt and go straight to json format
+                logger.debug(f"Using json format for model {OPENAI_SPEECH_MODEL} (cached capability)")
+                response_format = 'json'
+            else:
+                # Try verbose_json format first
+                response_format = 'verbose_json'
+            
             try:
                 form_data = aiohttp.FormData()
                 with open(file_path, 'rb') as audio_file:
@@ -369,12 +405,20 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                       filename=os.path.basename(file_path),
                                       content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                form_data.add_field('response_format', 'verbose_json')
+                form_data.add_field('response_format', response_format)
                 form_data.add_field('language', openai_language)
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
                         if response.status == 200:
+                            # Cache successful format support
+                            if not hasattr(StreamingTranscription, 'model_format_support'):
+                                StreamingTranscription.model_format_support = {}
+                            if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
+                                StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
+                            if response_format not in StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL]:
+                                StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].append(response_format)
+                            
                             result_json = await response.json()
                             logger.debug(f"OpenAI transcription result: {result_json}")
                             
@@ -401,8 +445,18 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                             return {"transcript": "", "words": []}
             
             except Exception as e:
-                if "verbose_json" in str(e) and (OPENAI_SPEECH_MODEL == "gpt-4o-mini-transcribe" or 
-                                               OPENAI_SPEECH_MODEL == "gpt-4o-transcribe"):
+                error_text = str(e)
+                if (response_format == 'verbose_json' and 
+                    (("verbose_json" in error_text and "not compatible" in error_text) or
+                     ("verbose_json" in error_text and "unsupported_value" in error_text))):
+                    # Update model format support cache
+                    if not hasattr(StreamingTranscription, 'model_format_support'):
+                        StreamingTranscription.model_format_support = {}
+                    if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
+                        StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
+                    if 'verbose_json' in StreamingTranscription.model_format_support.get(OPENAI_SPEECH_MODEL, []):
+                        StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].remove('verbose_json')
+                    
                     logger.warning(f"Model {OPENAI_SPEECH_MODEL} doesn't support verbose_json, falling back to json format")
                     
                     form_data = aiohttp.FormData()
@@ -418,6 +472,14 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, headers=headers, data=form_data) as response:
                             if response.status == 200:
+                                # Update model format support cache
+                                if not hasattr(StreamingTranscription, 'model_format_support'):
+                                    StreamingTranscription.model_format_support = {}
+                                if OPENAI_SPEECH_MODEL not in StreamingTranscription.model_format_support:
+                                    StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL] = []
+                                if 'json' not in StreamingTranscription.model_format_support.get(OPENAI_SPEECH_MODEL, []):
+                                    StreamingTranscription.model_format_support[OPENAI_SPEECH_MODEL].append('json')
+                                
                                 result_json = await response.json()
                                 logger.debug(f"OpenAI simple transcription result: {result_json}")
                                 

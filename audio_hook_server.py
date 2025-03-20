@@ -21,11 +21,14 @@ from config import (
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 
+# Import language normalization function
+from language_mapping import normalize_language_code
+
 # Import the appropriate speech transcription module based on the configured provider
 if SPEECH_PROVIDER == 'openai':
-    from openai_speech_transcription import StreamingTranscription, normalize_language_code
+    from openai_speech_transcription import StreamingTranscription
 else:
-    from google_speech_transcription import StreamingTranscription, normalize_language_code
+    from google_speech_transcription import StreamingTranscription
 
 from google_gemini_translation import translate_with_gemini
 
@@ -56,15 +59,23 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
+        # Total samples processed for offset calculation
         self.total_samples = 0
+        # Offset adjustment for control messages (discarded/paused)
         self.offset_adjustment = 0
+        # Timestamp when pause started, if any
         self.pause_start_time = None
 
-
+        # New language attributes:
+        # input_language comes from customConfig.inputLanguage (for transcription)
+        # destination_language comes from the "language" field (for translation)
         self.input_language = "en-US"
         self.destination_language = "en-US"
 
+        # Translation enable flag from customConfig.enableTranslation
         self.enable_translation = False
+
+        # Streaming transcription for each channel
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
 

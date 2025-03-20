@@ -35,6 +35,13 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in environment variables.")
 
+# OpenAI Speech-to-Text API settings
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+OPENAI_SPEECH_MODEL = os.getenv('OPENAI_SPEECH_MODEL', 'gpt-4o-mini-transcribe')
+
+# Speech recognition provider selection
+SPEECH_PROVIDER = os.getenv('SPEECH_PROVIDER', 'google').lower()  # 'google' or 'openai'
+
 # Genesys API key and Organization ID
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:

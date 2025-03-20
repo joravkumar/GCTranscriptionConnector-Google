@@ -4,3 +4,4 @@ pydub
 python-dotenv
 google-cloud-speech
 google-generativeai
+openai

@@ -8,16 +8,27 @@ from datetime import timedelta
 import uuid
 import tempfile
 import os
+import json
 
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
+from google.oauth2 import service_account
 
 from language_mapping import normalize_language_code
-from config import GOOGLE_SPEECH_MODEL
+from config import GOOGLE_SPEECH_MODEL, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT
 
-# Create the Speech client once and reuse it
+speech_client = None
 try:
-    speech_client = SpeechClient()
+    if os.path.isfile(GOOGLE_APPLICATION_CREDENTIALS):
+        speech_client = SpeechClient()
+    else:
+        try:
+            credentials_info = json.loads(GOOGLE_APPLICATION_CREDENTIALS)
+            credentials = service_account.Credentials.from_service_account_info(credentials_info)
+            speech_client = SpeechClient(credentials=credentials)
+        except json.JSONDecodeError:
+            logging.error("GOOGLE_APPLICATION_CREDENTIALS is neither a valid file path nor valid JSON")
+            speech_client = None
 except Exception as e:
     logging.error(f"Failed to create Google Speech client: {e}")
     speech_client = None
@@ -33,7 +44,6 @@ class StreamingTranscription:
         self.running = True
         self.last_frame_time = 0
         
-        # For Chirp 2, we need to provide a recognition config
         self.config = cloud_speech.RecognitionConfig(
             auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
             language_codes=[self.language],
@@ -47,7 +57,6 @@ class StreamingTranscription:
         )
 
     def start_streaming(self):
-        """Start the streaming recognition threads for each channel."""
         for channel in range(self.channels):
             self.streaming_threads[channel] = threading.Thread(
                 target=self.streaming_recognize_thread, args=(channel,)
@@ -55,31 +64,31 @@ class StreamingTranscription:
             self.streaming_threads[channel].start()
 
     def stop_streaming(self):
-        """Stop the streaming recognition threads and clean up."""
         self.running = False
         for channel in range(self.channels):
-            self.audio_queues[channel].put(None)  # Signal thread to exit
+            self.audio_queues[channel].put(None)
         for channel in range(self.channels):
             if self.streaming_threads[channel]:
                 self.streaming_threads[channel].join()
 
     def streaming_recognize_thread(self, channel):
-        """Run the streaming recognition in a separate thread for a specific channel."""
         try:
-            # Create a session for stream operations
+            if speech_client is None:
+                error_msg = "Google Speech client is not initialized. Check credentials."
+                self.logger.error(error_msg)
+                self.response_queues[channel].put(Exception(error_msg))
+                return
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-            # Create the streaming recognize generator
             generator = self.streaming_requests_generator(channel)
             
-            # Start the streaming recognition
             responses = speech_client.streaming_recognize(
                 requests=generator(),
                 timeout=300.0
             )
             
-            # Process the responses
             for response in responses:
                 if not self.running:
                     break
@@ -91,12 +100,14 @@ class StreamingTranscription:
             self.response_queues[channel].put(e)
 
     def streaming_requests_generator(self, channel):
-        """Generate streaming requests for audio data."""
         def gen_requests():
             try:
-                # First request is the config
+                if speech_client is None:
+                    self.logger.error("Cannot generate requests: Google Speech client is not initialized")
+                    return
+
                 yield cloud_speech.StreamingRecognizeRequest(
-                    recognizer=f"projects/{speech_client.project}/locations/global/recognizers/_",
+                    recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/global/recognizers/_",
                     streaming_config=cloud_speech.StreamingRecognitionConfig(
                         config=self.config,
                         streaming_features=cloud_speech.StreamingRecognitionFeatures(
@@ -109,14 +120,11 @@ class StreamingTranscription:
                     )
                 )
                 
-                # Subsequent requests are the audio data
                 while self.running:
-                    # Get audio data from the queue
                     audio_data = self.audio_queues[channel].get()
-                    if audio_data is None:  # End signal
+                    if audio_data is None:
                         break
                     
-                    # Send the audio data
                     yield cloud_speech.StreamingRecognizeRequest(
                         audio=audio_data
                     )
@@ -128,15 +136,12 @@ class StreamingTranscription:
         return gen_requests
 
     def feed_audio(self, audio_stream: bytes, channel: int):
-        """Feed audio data (PCMU) into the streaming queue for a specific channel after converting to PCM16."""
         if not audio_stream or channel >= self.channels:
             return
-        # Convert from PCMU (u-law) to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
         self.audio_queues[channel].put(pcm16_data)
 
     def get_response(self, channel: int):
-        """Retrieve the next transcription response from the queue for a specific channel."""
         if channel >= self.channels:
             return None
         try:
@@ -145,17 +150,6 @@ class StreamingTranscription:
             return None
 
 async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -> dict:
-    """
-    Process audio with Google Cloud Speech-to-Text API for non-streaming transcription.
-    
-    Args:
-        audio_stream: Raw PCMU audio data
-        negotiated_media: Media format information
-        logger: Logger instance
-        
-    Returns:
-        dict: A dictionary containing the transcript and word-level details
-    """
     if not audio_stream:
         logger.warning("google_speech_transcription - No audio data received for transcription.")
         return {"transcript": "", "words": []}
@@ -167,67 +161,55 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
     try:
         logger.info("Starting Google Speech-to-Text transcription process")
         
-        # Determine number of channels from negotiated media
         channels = 1
         if negotiated_media and "channels" in negotiated_media:
             channels = len(negotiated_media.get("channels", []))
             if channels == 0:
                 channels = 1
 
-        # Convert audio from PCMU to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
         logger.info(f"Converted PCMU to PCM16: {len(pcm16_data)} bytes, channels={channels}")
         
-        # Calculate audio energy
         rms_value = audioop.rms(pcm16_data, 2)
         logger.debug(f"PCM16 RMS value: {rms_value}")
         
-        # Skip processing if audio is too quiet
         if rms_value < 50:
             logger.info("PCM16 RMS value below threshold, skipping transcription")
             return {"transcript": "", "words": []}
 
-        # Extract the source language
         source_language = "en-US"
         if negotiated_media and "language" in negotiated_media:
             source_language = normalize_language_code(negotiated_media["language"])
         logger.info(f"Source language determined as: {source_language}")
         
-        # Create temp file for the audio
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
-            # Write WAV header
             sample_rate = 8000
-            sample_width = 2  # 16-bit PCM
+            sample_width = 2
             
-            # WAV header
             temp_wav.write(b'RIFF')
-            temp_wav.write((36 + len(pcm16_data)).to_bytes(4, 'little'))  # File size
+            temp_wav.write((36 + len(pcm16_data)).to_bytes(4, 'little'))
             temp_wav.write(b'WAVE')
             
-            # Format chunk
             temp_wav.write(b'fmt ')
-            temp_wav.write((16).to_bytes(4, 'little'))  # Format chunk size
-            temp_wav.write((1).to_bytes(2, 'little'))  # Audio format (PCM)
-            temp_wav.write((channels).to_bytes(2, 'little'))  # Channels
-            temp_wav.write((sample_rate).to_bytes(4, 'little'))  # Sample rate
-            temp_wav.write((sample_rate * channels * sample_width).to_bytes(4, 'little'))  # Byte rate
-            temp_wav.write((channels * sample_width).to_bytes(2, 'little'))  # Block align
-            temp_wav.write((sample_width * 8).to_bytes(2, 'little'))  # Bits per sample
+            temp_wav.write((16).to_bytes(4, 'little'))
+            temp_wav.write((1).to_bytes(2, 'little'))
+            temp_wav.write((channels).to_bytes(2, 'little'))
+            temp_wav.write((sample_rate).to_bytes(4, 'little'))
+            temp_wav.write((sample_rate * channels * sample_width).to_bytes(4, 'little'))
+            temp_wav.write((channels * sample_width).to_bytes(2, 'little'))
+            temp_wav.write((sample_width * 8).to_bytes(2, 'little'))
             
-            # Data chunk
             temp_wav.write(b'data')
-            temp_wav.write(len(pcm16_data).to_bytes(4, 'little'))  # Data size
+            temp_wav.write(len(pcm16_data).to_bytes(4, 'little'))
             temp_wav.write(pcm16_data)
             temp_wav.flush()
             
             file_path = temp_wav.name
         
         try:
-            # Read the file
             with open(file_path, "rb") as audio_file:
                 content = audio_file.read()
                 
-            # Set up recognition config
             config = cloud_speech.RecognitionConfig(
                 auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
                 language_codes=[source_language],
@@ -238,16 +220,14 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 )
             )
             
-            # Perform recognition
             request = cloud_speech.RecognizeRequest(
-                recognizer=f"projects/{speech_client.project}/locations/global/recognizers/_",
+                recognizer=f"projects/{GOOGLE_CLOUD_PROJECT}/locations/global/recognizers/_",
                 config=config,
                 content=content
             )
             
             response = speech_client.recognize(request=request)
             
-            # Process results
             transcript = ""
             words_list = []
             
@@ -258,7 +238,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 best_alternative = result.alternatives[0]
                 transcript += best_alternative.transcript + " "
                 
-                # Extract word-level information if available
                 for word in getattr(best_alternative, "words", []):
                     word_info = {
                         "word": word.word,
@@ -270,7 +249,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             
             transcript = transcript.strip()
             
-            # Create the result
             result = {
                 "transcript": transcript,
                 "confidence": getattr(best_alternative, "confidence", 1.0) if transcript else 0.0,
@@ -280,7 +258,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
             return result
         
         finally:
-            # Clean up
             if os.path.exists(file_path):
                 os.unlink(file_path)
                 

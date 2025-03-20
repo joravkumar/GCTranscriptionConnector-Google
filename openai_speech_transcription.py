@@ -16,21 +16,12 @@ from config import (
     OPENAI_API_KEY,
     OPENAI_SPEECH_MODEL
 )
-
-def normalize_language_code(lang: str) -> str:
-    """
-    Normalize language codes to the proper BCP-47 format (e.g. "es-es" -> "es-ES", "en-us" -> "en-US").
-    If the language code does not contain a hyphen, return it as is.
-    """
-    if '-' in lang:
-        parts = lang.split('-')
-        if len(parts) == 2:
-            return f"{parts[0].lower()}-{parts[1].upper()}"
-    return lang
+from language_mapping import normalize_language_code, get_openai_language_code
 
 class StreamingTranscription:
     def __init__(self, language: str, channels: int, logger):
         self.language = normalize_language_code(language)
+        self.openai_language = get_openai_language_code(language)
         self.channels = channels
         self.logger = logger
         self.audio_queues = [queue.Queue() for _ in range(channels)]
@@ -173,7 +164,7 @@ class StreamingTranscription:
                                    content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
                 form_data.add_field('response_format', 'verbose_json')
-                form_data.add_field('language', self.language)
+                form_data.add_field('language', self.openai_language)
                 
                 # For newer models that don't support verbose_json, we'll handle the fallback
                 try:
@@ -219,7 +210,7 @@ class StreamingTranscription:
                                    content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
                 form_data.add_field('response_format', 'json')
-                form_data.add_field('language', self.language)
+                form_data.add_field('language', self.openai_language)
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
@@ -391,7 +382,8 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         if negotiated_media and "language" in negotiated_media:
             source_language_raw = negotiated_media["language"]
         source_language = normalize_language_code(source_language_raw)
-        logger.info(f"Source language determined as: {source_language}")
+        openai_language = get_openai_language_code(source_language_raw)
+        logger.info(f"Source language determined as: {source_language} (OpenAI format: {openai_language})")
         
         # Create temp file for the audio
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
@@ -439,7 +431,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                       content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
                 form_data.add_field('response_format', 'verbose_json')
-                form_data.add_field('language', source_language)
+                form_data.add_field('language', openai_language)
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
@@ -484,7 +476,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                           content_type='audio/wav')
                     form_data.add_field('model', OPENAI_SPEECH_MODEL)
                     form_data.add_field('response_format', 'json')
-                    form_data.add_field('language', source_language)
+                    form_data.add_field('language', openai_language)
                     
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, headers=headers, data=form_data) as response:

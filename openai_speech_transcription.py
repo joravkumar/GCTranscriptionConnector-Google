@@ -2,12 +2,10 @@ import asyncio
 import audioop
 import os
 import json
-import hashlib
 import time
 import threading
 import queue
 import tempfile
-import base64
 from datetime import timedelta
 import aiohttp
 import logging
@@ -22,9 +20,25 @@ class MockResult:
     def __init__(self):
         self.results = []
 
+class Result:
+    def __init__(self, alternatives=None, is_final=True):
+        self.alternatives = alternatives or []
+        self.is_final = is_final
+
+class Alternative:
+    def __init__(self, transcript="", confidence=0.9, words=None):
+        self.transcript = transcript
+        self.confidence = confidence
+        self.words = words or []
+
+class Word:
+    def __init__(self, word="", start_offset=None, end_offset=None, confidence=0.9):
+        self.word = word
+        self.start_offset = start_offset or timedelta(seconds=0)
+        self.end_offset = end_offset or timedelta(seconds=1)
+        self.confidence = confidence
+
 class StreamingTranscription:
-    model_format_support = {}
-    
     def __init__(self, language: str, channels: int, logger):
         self.logger = logger
         self.language = normalize_language_code(language)
@@ -40,7 +54,7 @@ class StreamingTranscription:
         self.chunk_size = 24000
         self.last_chunk_time = [time.time() for _ in range(channels)]
         self.max_delay = 2.0
-        self.silence_threshold = 500  # RMS threshold for silence detection
+        self.silence_threshold = 100  # Lower threshold to detect more speech
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -117,7 +131,7 @@ class StreamingTranscription:
                             
                             try:
                                 result = loop.run_until_complete(
-                                    self.transcribe_audio(temp_wav.name, channel)
+                                    self.transcribe_audio_simple(temp_wav.name, channel)
                                 )
                                 self.response_queues[channel].put(result)
                             except Exception as e:
@@ -138,86 +152,6 @@ class StreamingTranscription:
             self.logger.error(f"Fatal error in streaming recognize thread for channel {channel}: {e}")
             self.response_queues[channel].put(e)
 
-    async def transcribe_audio(self, file_path, channel):
-        try:
-            openai_lang = self.openai_language
-            self.logger.info(f"Transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
-            self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
-            
-            # Check audio for silence
-            with open(file_path, 'rb') as f:
-                audio_data = f.read()
-                
-            # Get the audio data part (after WAV header)
-            audio_content = audio_data[44:]  # Skip WAV header
-            
-            # Check RMS value
-            rms = audioop.rms(audio_content, 2)
-            if rms < self.silence_threshold:
-                self.logger.info(f"Audio is silent (RMS: {rms}), skipping transcription")
-                return MockResult()
-            
-            url = "https://api.openai.com/v1/audio/transcriptions"
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}"
-            }
-            
-            # Check if we already know this model's capabilities
-            if OPENAI_SPEECH_MODEL in self.model_format_support and 'verbose_json' not in self.model_format_support[OPENAI_SPEECH_MODEL]:
-                self.logger.debug(f"Using json format for model {OPENAI_SPEECH_MODEL} (cached capability)")
-                return await self.transcribe_audio_simple(file_path, channel)
-            
-            with open(file_path, 'rb') as audio_file:
-                form_data = aiohttp.FormData()
-                form_data.add_field('file', 
-                                   audio_file, 
-                                   filename=os.path.basename(file_path),
-                                   content_type='audio/wav')
-                form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                form_data.add_field('response_format', 'verbose_json')
-                form_data.add_field('language', openai_lang)
-                
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, headers=headers, data=form_data) as response:
-                            if response.status == 200:
-                                # Cache successful format support
-                                if OPENAI_SPEECH_MODEL not in self.model_format_support:
-                                    self.model_format_support[OPENAI_SPEECH_MODEL] = ['verbose_json']
-                                
-                                result_json = await response.json()
-                                self.logger.debug(f"OpenAI transcription result: {result_json}")
-                                
-                                # Check if the response is empty or contains only whitespace
-                                if not result_json.get('text') or result_json.get('text').strip() == "":
-                                    self.logger.info("OpenAI returned empty transcript, returning empty result")
-                                    return MockResult()
-                                
-                                return self.convert_to_google_format(result_json, channel)
-                            else:
-                                error_text = await response.text()
-                                error_msg = f"OpenAI API error: {response.status} - {error_text}"
-                                self.logger.error(error_msg)
-                                return MockResult()
-                except Exception as e:
-                    error_text = str(e)
-                    if ("verbose_json" in error_text and "not compatible" in error_text) or \
-                       ("verbose_json" in error_text and "unsupported_value" in error_text):
-                        # Update model format support cache
-                        if OPENAI_SPEECH_MODEL not in self.model_format_support:
-                            self.model_format_support[OPENAI_SPEECH_MODEL] = []
-                        if 'verbose_json' in self.model_format_support.get(OPENAI_SPEECH_MODEL, []):
-                            self.model_format_support[OPENAI_SPEECH_MODEL].remove('verbose_json')
-                        
-                        self.logger.warning(f"Model {OPENAI_SPEECH_MODEL} doesn't support verbose_json, falling back to json format")
-                        return await self.transcribe_audio_simple(file_path, channel)
-                    else:
-                        self.logger.error(f"Error in OpenAI transcription: {e}")
-                        return MockResult()
-        except Exception as e:
-            self.logger.error(f"Error in OpenAI transcription: {e}")
-            return MockResult()
-
     async def transcribe_audio_simple(self, file_path, channel):
         try:
             openai_lang = self.openai_language
@@ -235,7 +169,7 @@ class StreamingTranscription:
             rms = audioop.rms(audio_content, 2)
             if rms < self.silence_threshold:
                 self.logger.info(f"Audio is silent (RMS: {rms}), skipping transcription")
-                return MockResult()
+                return self.create_empty_result()
             
             url = "https://api.openai.com/v1/audio/transcriptions"
             headers = {
@@ -249,113 +183,67 @@ class StreamingTranscription:
                                    filename=os.path.basename(file_path),
                                    content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                form_data.add_field('response_format', 'json')
+                form_data.add_field('response_format', 'json')  # Always use json format for GPT-4o models
                 form_data.add_field('language', openai_lang)
                 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers, data=form_data) as response:
                         if response.status == 200:
-                            # Update model format support cache
-                            if OPENAI_SPEECH_MODEL not in self.model_format_support:
-                                self.model_format_support[OPENAI_SPEECH_MODEL] = []
-                            if 'json' not in self.model_format_support.get(OPENAI_SPEECH_MODEL, []):
-                                self.model_format_support[OPENAI_SPEECH_MODEL].append('json')
-                            
                             result_json = await response.json()
                             self.logger.debug(f"OpenAI simple transcription result: {result_json}")
                             
                             # Check if the response is empty or contains only whitespace
                             if not result_json.get('text') or result_json.get('text').strip() == "":
                                 self.logger.info("OpenAI returned empty transcript, returning empty result")
-                                return MockResult()
+                                return self.create_empty_result()
                             
                             return self.convert_simple_to_google_format(result_json, channel)
                         else:
                             error_text = await response.text()
                             error_msg = f"OpenAI API error: {response.status} - {error_text}"
                             self.logger.error(error_msg)
-                            return MockResult()
+                            return self.create_empty_result()
         except Exception as e:
             self.logger.error(f"Error in simple OpenAI transcription: {e}")
-            return MockResult()
+            return self.create_empty_result()
 
-    def convert_to_google_format(self, openai_response, channel):
-        from google.cloud.speech_v2 import SpeechClient
-        from google.cloud.speech_v2.types import cloud_speech
-        
-        mock_result = type('MockResult', (), {})
-        mock_result.results = []
-        
-        if 'text' in openai_response and openai_response['text'].strip():
-            result = type('Result', (), {})
-            result.alternatives = []
-            result.is_final = True
-            
-            alternative = type('Alternative', (), {})
-            alternative.transcript = openai_response['text']
-            alternative.confidence = 0.9
-            
-            if 'words' in openai_response and openai_response['words']:
-                alternative.words = []
-                for word_info in openai_response['words']:
-                    word = type('Word', (), {})
-                    word.word = word_info.get('word', '')
-                    
-                    start_sec = word_info.get('start', 0)
-                    end_sec = word_info.get('end', 0)
-                    word.start_offset = timedelta(seconds=start_sec)
-                    word.end_offset = timedelta(seconds=end_sec)
-                    
-                    word.confidence = word_info.get('confidence', 0.9)
-                    
-                    alternative.words.append(word)
-            else:
-                alternative.words = []
-                word = type('Word', (), {})
-                word.word = openai_response['text']
-                word.start_offset = timedelta(seconds=0)
-                word.end_offset = timedelta(seconds=2)
-                word.confidence = 0.9
-                alternative.words.append(word)
-            
-            result.alternatives.append(alternative)
-            mock_result.results.append(result)
-        
+    def create_empty_result(self):
+        mock_result = MockResult()
         return mock_result
 
     def convert_simple_to_google_format(self, openai_response, channel):
-        from google.cloud.speech_v2 import SpeechClient
-        from google.cloud.speech_v2.types import cloud_speech
-        
-        mock_result = type('MockResult', (), {})
-        mock_result.results = []
+        mock_result = MockResult()
         
         if 'text' in openai_response and openai_response['text'].strip():
-            result = type('Result', (), {})
-            result.alternatives = []
-            result.is_final = True
+            transcript = openai_response['text'].strip()
             
-            alternative = type('Alternative', (), {})
-            alternative.transcript = openai_response['text']
-            alternative.confidence = 0.9
+            # Create word objects
+            words = []
+            text_words = transcript.split()
+            if text_words:
+                avg_duration = 2.0 / len(text_words)
+                for i, word_text in enumerate(text_words):
+                    word = Word(
+                        word=word_text,
+                        start_offset=timedelta(seconds=i * avg_duration),
+                        end_offset=timedelta(seconds=(i + 1) * avg_duration),
+                        confidence=0.9
+                    )
+                    words.append(word)
             
-            words = openai_response['text'].split()
-            if words:
-                alternative.words = []
-                avg_duration = 2.0 / len(words)
-                
-                for i, word_text in enumerate(words):
-                    word = type('Word', (), {})
-                    word.word = word_text
-                    word.start_offset = timedelta(seconds=i * avg_duration)
-                    word.end_offset = timedelta(seconds=(i + 1) * avg_duration)
-                    word.confidence = 0.9
-                    alternative.words.append(word)
-            else:
-                alternative.words = []
+            # Create alternative and result objects
+            alternative = Alternative(
+                transcript=transcript,
+                confidence=0.9,
+                words=words
+            )
             
-            result.alternatives.append(alternative)
-            mock_result.results.append(result)
+            result = Result(
+                alternatives=[alternative],
+                is_final=True
+            )
+            
+            mock_result.results = [result]
         
         return mock_result
 
@@ -393,7 +281,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
         rms_value = audioop.rms(pcm16_data, 2)
         logger.debug(f"PCM16 RMS value: {rms_value}")
         
-        if rms_value < 500:  # Higher threshold for silence detection
+        if rms_value < 100:  # Lower threshold for silence detection
             logger.info("PCM16 RMS value below threshold, skipping transcription")
             return {"transcript": "", "words": []}
 
@@ -435,8 +323,6 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
-            response_format = 'json' # More reliable to use json format directly
-            
             try:
                 form_data = aiohttp.FormData()
                 with open(file_path, 'rb') as audio_file:
@@ -445,7 +331,7 @@ async def translate_audio(audio_stream: bytes, negotiated_media: dict, logger) -
                                       filename=os.path.basename(file_path),
                                       content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                form_data.add_field('response_format', response_format)
+                form_data.add_field('response_format', 'json')  # Always use json format for GPT-4o models
                 form_data.add_field('language', openai_language)
                 
                 async with aiohttp.ClientSession() as session:

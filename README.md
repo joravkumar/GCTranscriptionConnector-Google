@@ -272,6 +272,11 @@ The connector automatically adapts to whichever provider and model is specified 
   - Defaults to "en-US" if not provided.
   - Normalized to BCP-47 format using `normalize_language_code`.
 
+- **Language Code Mapping for OpenAI:**
+  - OpenAI's speech models support ISO 639-1/639-3 language codes rather than BCP-47 format.
+  - The connector automatically maps BCP-47 codes (e.g., "es-ES") to ISO codes (e.g., "es") before sending to OpenAI.
+  - This mapping is handled transparently, so you can continue using BCP-47 codes in your Genesys configuration.
+
 - **Destination Language:**  
   - Determined from the `language` field in the "open" message.
   - Used as the target language for translation via Google Gemini when translation is enabled.

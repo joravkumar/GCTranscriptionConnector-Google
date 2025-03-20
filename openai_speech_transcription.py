@@ -20,11 +20,11 @@ from language_mapping import normalize_language_code, get_openai_language_code
 
 class StreamingTranscription:
     def __init__(self, language: str, channels: int, logger):
+        self.logger = logger
         self.language = normalize_language_code(language)
         self.openai_language = get_openai_language_code(self.language)
         self.logger.info(f"Initialized StreamingTranscription with language={self.language}, openai_language={self.openai_language}")
         self.channels = channels
-        self.logger = logger
         self.audio_queues = [queue.Queue() for _ in range(channels)]
         self.response_queues = [queue.Queue() for _ in range(channels)]
         self.streaming_threads = [None] * channels

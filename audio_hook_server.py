@@ -15,11 +15,18 @@ from config import (
     GENESYS_MSG_BURST_LIMIT,
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
-    SUPPORTED_LANGUAGES
+    SUPPORTED_LANGUAGES,
+    SPEECH_PROVIDER
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
-from google_speech_transcription import StreamingTranscription, normalize_language_code
+
+# Import the appropriate speech transcription module based on the configured provider
+if SPEECH_PROVIDER == 'openai':
+    from openai_speech_transcription import StreamingTranscription, normalize_language_code
+else:
+    from google_speech_transcription import StreamingTranscription, normalize_language_code
+
 from google_gemini_translation import translate_with_gemini
 
 from collections import deque
@@ -49,23 +56,15 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # Total samples processed for offset calculation
         self.total_samples = 0
-        # Offset adjustment for control messages (discarded/paused)
         self.offset_adjustment = 0
-        # Timestamp when pause started, if any
         self.pause_start_time = None
 
-        # New language attributes:
-        # input_language comes from customConfig.inputLanguage (for transcription)
-        # destination_language comes from the "language" field (for translation)
+
         self.input_language = "en-US"
         self.destination_language = "en-US"
 
-        # Translation enable flag from customConfig.enableTranslation
         self.enable_translation = False
-
-        # Streaming transcription for each channel
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
 
@@ -470,9 +469,21 @@ class AudioHookServer:
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
     
-                    # Use Chirp 2's actual confidence or default to 1.0 for Chirp
-                    from config import GOOGLE_SPEECH_MODEL
-                    use_actual_confidence = GOOGLE_SPEECH_MODEL.lower() == 'chirp_2'
+                    # Use appropriate confidence values based on the speech provider
+                    from config import SPEECH_PROVIDER, GOOGLE_SPEECH_MODEL
+                    
+                    # Default confidence value
+                    overall_confidence = default_confidence
+                    
+                    # If using Google with Chirp 2, use the actual confidence
+                    if SPEECH_PROVIDER == 'google' and GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                        use_actual_confidence = True
+                        if hasattr(alt, "confidence") and alt.confidence is not None:
+                            overall_confidence = alt.confidence
+                    # If using OpenAI, we already set a reasonable confidence value
+                    elif SPEECH_PROVIDER == 'openai':
+                        if hasattr(alt, "confidence") and alt.confidence is not None:
+                            overall_confidence = alt.confidence
                     
                     # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
@@ -483,8 +494,8 @@ class AudioHookServer:
                             tokens = []
                             for i, word in enumerate(words_list):
                                 token_offset = overall_start + i * per_word_duration
-                                # Always use 1.0 for Chirp or actual confidence for Chirp 2
-                                confidence = alt.confidence if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None else default_confidence
+                                # Use appropriate confidence value
+                                confidence = overall_confidence
                                 tokens.append({
                                     "type": "word",
                                     "value": word,
@@ -494,11 +505,10 @@ class AudioHookServer:
                                     "language": dest_lang
                                 })
                         else:
-                            confidence = alt.confidence if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None else default_confidence
                             tokens = [{
                                 "type": "word",
                                 "value": translated_text,
-                                "confidence": confidence,
+                                "confidence": overall_confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
                                 "language": dest_lang
@@ -511,10 +521,9 @@ class AudioHookServer:
                                 token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
                                 
-                                # For Chirp model, always use confidence = 1.0
-                                # For Chirp 2, use the actual confidence if available
+                                # Get word confidence
                                 word_confidence = default_confidence
-                                if use_actual_confidence and hasattr(w, "confidence") and w.confidence is not None:
+                                if hasattr(w, "confidence") and w.confidence is not None:
                                     word_confidence = w.confidence
                                     
                                 tokens.append({
@@ -530,19 +539,12 @@ class AudioHookServer:
                             tokens = [{
                                 "type": "word",
                                 "value": transcript_text,
-                                "confidence": default_confidence,
+                                "confidence": overall_confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
                                 "language": dest_lang
                             }]
     
-                    # Set the correct overall confidence for the alternative
-                    # For Chirp, always use 1.0
-                    # For Chirp 2, use the actual value if available
-                    overall_confidence = default_confidence
-                    if use_actual_confidence and hasattr(alt, "confidence") and alt.confidence is not None:
-                        overall_confidence = alt.confidence
-                    
                     alternative = {
                         "confidence": overall_confidence,
                         **({"languages": [dest_lang]} if self.enable_translation else {}),

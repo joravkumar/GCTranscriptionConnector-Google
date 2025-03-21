@@ -421,5 +421,5 @@ All configurable parameters are defined in `config.py` and loaded from environme
 - **Google Transcription: Random numbers in the transcription:**  
   - From time to time some arbitrary numbers show up in the transcription, totally unrelated to the conversation itself. It requires further investigation.
  
-- **OpenAI Transcription: Inconsistent transcription:**  
-  - Some arbitrary sentences included that were never said. Sentences are sometimes split in more than one chunk where they shouldn't
+- **OpenAI Transcription: Spurious initial transcripts:**  
+  - Some arbitrary sentences included at the beginning, like "context:". It requires further investigation.

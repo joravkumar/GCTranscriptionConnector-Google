@@ -74,9 +74,6 @@ class StreamingTranscription:
         # Track last utterances to prevent duplicates
         self.last_transcripts = ["" for _ in range(channels)]
         self.transcript_history = [deque(maxlen=5) for _ in range(channels)]
-        
-        # Minimum transcript confidence to be considered valid
-        self.min_confidence_threshold = 0.4
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -213,15 +210,13 @@ class StreamingTranscription:
                     if result and not isinstance(result, Exception):
                         # Check if transcript is valid and non-empty
                         transcript_text = ""
-                        confidence = 0.0
                         
                         if result.results and result.results[0].alternatives:
                             alt = result.results[0].alternatives[0]
                             transcript_text = alt.transcript
-                            confidence = alt.confidence
                             
-                            # Only process if transcript has minimum confidence and is non-empty
-                            if transcript_text and confidence >= self.min_confidence_threshold:
+                            # Only process if transcript is non-empty
+                            if transcript_text:
                                 # Check for duplicates or significant overlap with recent transcripts
                                 is_duplicate = False
                                 for prev_transcript in self.transcript_history[channel]:
@@ -235,11 +230,11 @@ class StreamingTranscription:
                                     self.transcript_history[channel].append(transcript_text)
                                     self.response_queues[channel].put(result)
                                     self.logger.debug(f"Full transcript: {transcript_text}")
-                                    self.logger.debug(f"Average confidence: {confidence}")
+                                    self.logger.debug(f"Average confidence: {alt.confidence}")
                                 else:
                                     self.logger.debug(f"Skipping duplicate transcript: {transcript_text}")
                             else:
-                                self.logger.debug(f"Low confidence or empty transcript, skipping. Confidence: {confidence}")
+                                self.logger.debug("Empty transcript, skipping.")
                 except Exception as e:
                     self.logger.error(f"Error in OpenAI transcription: {e}")
                 finally:

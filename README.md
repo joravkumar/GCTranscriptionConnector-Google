@@ -163,13 +163,24 @@ The application is built around the following core components:
 
 - **openai_speech_transcription.py**  
   Implements the StreamingTranscription class for real-time transcription using OpenAI's Speech-to-Text API.
-  Handles audio conversion, buffering, and sending to OpenAI's API.
-  Returns responses in a format compatible with the existing code structure.
+  Features:
+  - Intelligent buffering system that accumulates audio until complete utterances are detected
+  - Voice Activity Detection (VAD) to identify speech segments and silence
+  - Creates temporary WAV files for processing detected utterances
+  - Streams data to OpenAI's API with appropriate parameters for real-time performance
+  - Processes response chunks to build complete transcripts with confidence scores
+  - Includes language code mapping from BCP-47 to ISO formats
+  - Generates synthetic word-level timing information for compatibility with Genesys AudioHook
 
 - **google_gemini_translation.py**  
   Implements the translate_with_gemini function for translating text using Google Gemini.
   Uses structured output (via Pydantic) to ensure only the translation is returned.
   Handles translation errors and logs them appropriately.
+
+- **language_mapping.py**  
+  Contains functions for normalizing language codes:
+  - `normalize_language_code`: Normalizes language codes to BCP-47 format (e.g., "es-es" → "es-ES").
+  - `get_openai_language_code`: Maps BCP-47 codes to ISO 639-1/639-3 codes compatible with OpenAI's API.
 
 - **rate_limiter.py**  
   Provides an asynchronous rate limiter (RateLimiter) to throttle message sending.
@@ -203,13 +214,30 @@ The application is built around the following core components:
   - The server processes control messages such as **"paused"**, **"discarded"**, and **"resumed"**.
   - These messages adjust an internal offset (tracked as processed audio samples) so that transcription offsets and durations accurately reflect only the audio that was received (excluding any gaps due to pauses or audio loss).
 
-- **Transcription:**  
-  - Uses either:
-    - Google Cloud Speech-to-Text API with streaming recognition.
-    - OpenAI Speech-to-Text API with buffered streaming.
-  - Feeds PCM16 audio to `StreamingTranscription` instances (one per channel).
+- **Transcription Provider Selection:**
+  - The system dynamically selects the appropriate transcription provider based on the SPEECH_PROVIDER environment variable.
+  - This selection determines which implementation of StreamingTranscription is instantiated.
+
+- **Google Cloud Transcription:**  
+  - Uses Google Cloud Speech-to-Text API with streaming recognition.
+  - Feeds PCM16 audio directly to the API.
   - Retrieves transcription results with word-level timing and confidence scores when available.
-  - Adjusts calculated offsets by subtracting the cumulative gap from control messages.
+
+- **OpenAI Transcription:**
+  - Uses an intelligent utterance detection system:
+    - Accumulates audio frames in a buffer
+    - Applies Voice Activity Detection (VAD) to identify speech segments
+    - Detects end of utterances based on silence duration (currently 800ms)
+    - Creates temporary WAV files for complete utterances
+    - Sends audio to OpenAI's API via streaming for real-time results
+    - Process chunked responses to build complete transcriptions
+    - Extracts confidence scores from logprobs when available
+    - Generates synthetic word-level timing since OpenAI doesn't provide it
+  - Implements safeguards:
+    - Timeout-based processing to ensure audio doesn't accumulate indefinitely
+    - Energy thresholds to avoid processing silence
+    - Buffer overflow prevention
+    - Duplicate transcript prevention
 
 - **Translation (Optional):**  
   - If `customConfig.enableTranslation` is set to true in the open message, the transcribed text is sent to Google Gemini for translation into the destination language.
@@ -247,14 +275,19 @@ This connector supports two speech recognition providers:
 - **gpt-4o-mini-transcribe:** 
   - Default model, balancing speed and accuracy
   - Limited parameter support (no timestamps)
-  - Supported formats: json or text only
+  - Uses a sophisticated buffering system to detect complete utterances
+  - Features:
+    - Voice Activity Detection to process only speech segments
+    - Response streaming for real-time results
+    - Confidence scores derived from token logprobs
+    - Synthetic word-level timing for Genesys compatibility
 
 - **gpt-4o-transcribe:**
   - Higher quality model for more accurate transcriptions
   - Limited parameter support (no timestamps)
-  - Supported formats: json or text only
+  - Same processing features as gpt-4o-mini-transcribe
 
-The connector automatically adapts to whichever provider and model is specified in the environment variables, adjusting request parameters and response handling accordingly. When using models without word-level confidence, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying default confidence values where needed.
+The connector automatically adapts to whichever provider and model is specified in the environment variables, adjusting request parameters and response handling accordingly. When using models without word-level confidence or timing, the connector still maintains full compatibility with the Genesys AudioHook protocol by supplying generated values where needed.
 
 ---
 
@@ -274,7 +307,8 @@ The connector automatically adapts to whichever provider and model is specified 
 
 - **Language Code Mapping for OpenAI:**
   - OpenAI's speech models support ISO 639-1/639-3 language codes rather than BCP-47 format.
-  - The connector automatically maps BCP-47 codes (e.g., "es-ES") to ISO codes (e.g., "es") before sending to OpenAI.
+  - The connector automatically maps BCP-47 codes (e.g., "es-ES") to ISO codes (e.g., "es") before sending to OpenAI using the `get_openai_language_code` function.
+  - This mapping covers all major language variants (Spanish, English, French, etc.) and gracefully handles unsupported codes.
   - This mapping is handled transparently, so you can continue using BCP-47 codes in your Genesys configuration.
 
 - **Destination Language:**  
@@ -416,10 +450,20 @@ All configurable parameters are defined in `config.py` and loaded from environme
 
 ---
 
-## Issues
+## Known Issues
 
 - **Google Transcription: Random numbers in the transcription:**  
   - From time to time some arbitrary numbers show up in the transcription, totally unrelated to the conversation itself. It requires further investigation.
  
 - **OpenAI Transcription: Spurious initial transcripts:**  
   - Some arbitrary sentences included at the beginning, like "context:". It requires further investigation.
+  - This may be related to the contextual prompt provided during transcription.
+
+- **OpenAI Transcription: Synthetic word timing:**
+  - Because OpenAI's Speech API doesn't provide word-level timing information, the connector generates synthetic timestamps based on transcript length.
+  - This may cause slight misalignment in the Genesys UI compared to actual speech timing.
+  
+- **OpenAI Transcription: Latency during speech detection:**
+  - The utterance detection system waits for silence (800ms) to determine the end of speech.
+  - This introduces a small latency between someone speaking and the transcript appearing.
+  - This is a tradeoff to ensure complete utterances are captured rather than partial fragments.

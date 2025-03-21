@@ -58,19 +58,25 @@ class StreamingTranscription:
         self.last_process_time = [time.time() for _ in range(channels)]
         
         # VAD parameters for detecting speech segments
-        self.vad_threshold = 200
+        self.vad_threshold = 300  # Increased for better speech detection
+        self.vad_min_duration = 0.5  # Minimum speech duration in seconds
         self.is_speech = [False for _ in range(channels)]
         self.silence_frames = [0 for _ in range(channels)]
         self.speech_frames = [0 for _ in range(channels)]
         
-        # Silence duration to consider end of utterance (800ms)
-        self.silence_threshold_frames = 8
+        # Silence duration to consider end of utterance (700ms)
+        self.silence_threshold_frames = 7
         
         # Keep track of accumulated audio for streaming
         self.accumulated_audio = [bytearray() for _ in range(channels)]
+        self.audio_start_times = [time.time() for _ in range(channels)]
         
-        # Track last utterance to prevent duplicates
+        # Track last utterances to prevent duplicates
         self.last_transcripts = ["" for _ in range(channels)]
+        self.transcript_history = [deque(maxlen=5) for _ in range(channels)]
+        
+        # Minimum transcript confidence to be considered valid
+        self.min_confidence_threshold = 0.4
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -105,46 +111,59 @@ class StreamingTranscription:
                             self._process_accumulated_audio(channel, loop)
                         break
                     
-                    # Approximate frame duration
-                    frame_duration = len(audio_chunk) / 16000.0  # 8000 Hz * 2 bytes per sample
-                    
                     # Check audio energy for VAD
                     rms = audioop.rms(audio_chunk, 2)
-                    is_current_speech = rms > self.vad_threshold
                     
-                    # Always add to accumulated buffer for continuous streaming
+                    # Add to accumulated buffer
                     self.accumulated_audio[channel].extend(audio_chunk)
+                    
+                    # More robust speech detection
+                    is_current_speech = rms > self.vad_threshold
                     
                     # VAD state machine for utterance detection
                     if is_current_speech:
                         self.silence_frames[channel] = 0
                         self.speech_frames[channel] += 1
                         
-                        if not self.is_speech[channel] and self.speech_frames[channel] >= 2:
+                        # Make sure we have enough continuous speech frames before considering this speech
+                        if not self.is_speech[channel] and self.speech_frames[channel] >= 3:
                             self.is_speech[channel] = True
                             self.logger.debug(f"Channel {channel}: Speech detected")
-                            
+                            # Reset audio start time to better track utterance duration
+                            if not self.audio_start_times[channel]:
+                                self.audio_start_times[channel] = time.time()
                     else:
                         # Not speech
-                        self.speech_frames[channel] = 0
-                        
                         if self.is_speech[channel]:
                             self.silence_frames[channel] += 1
                             
                             # If we've detected enough silence after speech, process the utterance
                             if self.silence_frames[channel] >= self.silence_threshold_frames:
+                                # Only process if we had enough speech
+                                speech_duration = time.time() - self.audio_start_times[channel]
+                                if speech_duration >= self.vad_min_duration:
+                                    self.logger.debug(f"Channel {channel}: End of speech detected")
+                                    self._process_accumulated_audio(channel, loop)
+                                else:
+                                    # Too short to be meaningful speech, discard it
+                                    self.logger.debug(f"Channel {channel}: Speech too short ({speech_duration:.2f}s), discarding")
+                                    self.accumulated_audio[channel] = bytearray()
+                                
+                                # Reset speech detection state
                                 self.is_speech[channel] = False
-                                self.logger.debug(f"Channel {channel}: End of speech detected")
-                                self._process_accumulated_audio(channel, loop)
+                                self.speech_frames[channel] = 0
+                                self.audio_start_times[channel] = None
+                        else:
+                            self.speech_frames[channel] = 0
                     
-                    # Periodically process accumulated audio even during continuous speech
+                    # Periodically process accumulated audio (every 2.5s) to avoid buffering too much
                     current_time = time.time()
-                    if current_time - self.last_process_time[channel] > 3.0 and len(self.accumulated_audio[channel]) > frame_size * 30:
+                    if current_time - self.last_process_time[channel] > 2.5 and len(self.accumulated_audio[channel]) > frame_size * 40:
                         self.logger.debug(f"Channel {channel}: Processing accumulated audio due to timeout")
                         self._process_accumulated_audio(channel, loop)
                     
-                    # Prevent buffer overflow
-                    if len(self.accumulated_audio[channel]) > frame_size * 300:  # ~30 seconds
+                    # Prevent buffer overflow (hard limit at 20 seconds)
+                    if len(self.accumulated_audio[channel]) > frame_size * 160:
                         self.logger.warning(f"Channel {channel}: Buffer overflow, forcing processing")
                         self._process_accumulated_audio(channel, loop)
                 
@@ -160,10 +179,13 @@ class StreamingTranscription:
 
     def _process_accumulated_audio(self, channel, loop):
         """Process accumulated audio using OpenAI streaming transcription"""
-        if len(self.accumulated_audio[channel]) < 1600:  # Less than 0.1s at 8kHz
+        # Need at least 0.2s of audio to be meaningful
+        min_audio_size = 3200
+        if len(self.accumulated_audio[channel]) < min_audio_size:
             self.logger.debug(f"Accumulated audio too short ({len(self.accumulated_audio[channel])} bytes), skipping")
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
+            self.audio_start_times[channel] = None
             return
             
         try:
@@ -171,33 +193,55 @@ class StreamingTranscription:
             audio_data = bytes(self.accumulated_audio[channel])
             rms = audioop.rms(audio_data, 2)
             
-            if rms < self.vad_threshold * 0.7:
+            # Skip processing if audio is mostly silence
+            if rms < 50:
                 self.logger.debug(f"Audio mostly silence (RMS: {rms}), skipping")
                 self.accumulated_audio[channel] = bytearray()
                 self.last_process_time[channel] = time.time()
+                self.audio_start_times[channel] = None
                 return
                 
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
                 self._write_wav_file(temp_wav, audio_data)
                 
                 try:
-                    # Use OpenAI streaming transcription
+                    # Use OpenAI transcription
                     result = loop.run_until_complete(
-                        self.stream_transcribe_audio(temp_wav.name, channel)
+                        self.transcribe_audio(temp_wav.name, channel)
                     )
                     
                     if result and not isinstance(result, Exception):
-                        # Check if transcript is different from last one
+                        # Check if transcript is valid and non-empty
                         transcript_text = ""
-                        if result.results and result.results[0].alternatives:
-                            transcript_text = result.results[0].alternatives[0].transcript
+                        confidence = 0.0
                         
-                        # Only send if non-empty and different from last transcript
-                        if transcript_text and transcript_text != self.last_transcripts[channel]:
-                            self.response_queues[channel].put(result)
-                            self.last_transcripts[channel] = transcript_text
+                        if result.results and result.results[0].alternatives:
+                            alt = result.results[0].alternatives[0]
+                            transcript_text = alt.transcript
+                            confidence = alt.confidence
+                            
+                            # Only process if transcript has minimum confidence and is non-empty
+                            if transcript_text and confidence >= self.min_confidence_threshold:
+                                # Check for duplicates or significant overlap with recent transcripts
+                                is_duplicate = False
+                                for prev_transcript in self.transcript_history[channel]:
+                                    # Check if new transcript is contained within a previous one
+                                    if transcript_text in prev_transcript or prev_transcript in transcript_text:
+                                        is_duplicate = True
+                                        break
+                                        
+                                if not is_duplicate:
+                                    # Add to history and send response
+                                    self.transcript_history[channel].append(transcript_text)
+                                    self.response_queues[channel].put(result)
+                                    self.logger.debug(f"Full transcript: {transcript_text}")
+                                    self.logger.debug(f"Average confidence: {confidence}")
+                                else:
+                                    self.logger.debug(f"Skipping duplicate transcript: {transcript_text}")
+                            else:
+                                self.logger.debug(f"Low confidence or empty transcript, skipping. Confidence: {confidence}")
                 except Exception as e:
-                    self.logger.error(f"Error in OpenAI streaming transcription: {e}")
+                    self.logger.error(f"Error in OpenAI transcription: {e}")
                 finally:
                     # Clean up temp file
                     try:
@@ -208,10 +252,12 @@ class StreamingTranscription:
             # Reset accumulated audio and update last process time
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
+            self.audio_start_times[channel] = None
         except Exception as e:
             self.logger.error(f"Error processing accumulated audio: {e}")
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
+            self.audio_start_times[channel] = None
 
     def _write_wav_file(self, temp_wav, audio_data):
         """Write PCM16 data to a WAV file"""
@@ -238,8 +284,8 @@ class StreamingTranscription:
         temp_wav.write(audio_data)
         temp_wav.flush()
 
-    async def stream_transcribe_audio(self, file_path, channel):
-        """Stream transcribe audio using OpenAI's streaming API"""
+    async def transcribe_audio(self, file_path, channel):
+        """Transcribe audio using OpenAI's API"""
         try:
             openai_lang = self.openai_language
             self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
@@ -259,12 +305,6 @@ class StreamingTranscription:
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
                 form_data.add_field('response_format', 'json')
                 
-                # Enable streaming for real-time results
-                form_data.add_field('stream', 'true')
-                
-                # Include logprobs for token confidence
-                form_data.add_field('include[]', 'logprobs')
-                
                 # Set temperature to 0 for most deterministic results
                 form_data.add_field('temperature', '0')
                 
@@ -272,72 +312,24 @@ class StreamingTranscription:
                 if openai_lang:
                     form_data.add_field('language', openai_lang)
                 
-                # Add contextual prompt for service call transcriptions
-                prompt = "This is a customer service call. The customer may be discussing problems with services or products."
-                form_data.add_field('prompt', prompt)
-                
-                full_transcript = ""
-                words = []
-                avg_confidence = 0.9  # Default
-                confidence_sum = 0
-                confidence_count = 0
-                
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.post(url, headers=headers, data=form_data, timeout=30) as response:
+                        async with session.post(url, headers=headers, data=form_data, timeout=10) as response:
                             if response.status == 200:
-                                # Process streaming response
-                                buffer = ""
-                                async for line in response.content:
-                                    line = line.decode('utf-8').strip()
-                                    if line.startswith('data: '):
-                                        event_data = line[6:]  # Remove 'data: ' prefix
-                                        if event_data == '[DONE]':
-                                            break
-                                            
-                                        try:
-                                            event_json = json.loads(event_data)
-                                            event_type = event_json.get('type')
-                                            
-                                            # Handle different event types
-                                            if event_type == 'transcript.text.delta':
-                                                delta = event_json.get('delta', '')
-                                                full_transcript += delta
-                                                
-                                                # Extract logprobs for confidence
-                                                if 'logprobs' in event_json:
-                                                    for logprob in event_json['logprobs']:
-                                                        token_logprob = logprob.get('logprob', 0)
-                                                        # Convert logprob to linear probability and cap at 0.99
-                                                        token_confidence = min(0.99, math.exp(token_logprob))
-                                                        confidence_sum += token_confidence
-                                                        confidence_count += 1
-                                                
-                                            elif event_type == 'transcript.text.done':
-                                                # Final transcript with all tokens
-                                                full_transcript = event_json.get('text', '')
-                                                
-                                                # Calculate final confidence from logprobs
-                                                if 'logprobs' in event_json and event_json['logprobs']:
-                                                    for logprob in event_json['logprobs']:
-                                                        token_logprob = logprob.get('logprob', 0)
-                                                        token_confidence = min(0.99, math.exp(token_logprob))
-                                                        confidence_sum += token_confidence
-                                                        confidence_count += 1
-                                                
-                                        except json.JSONDecodeError:
-                                            self.logger.warning(f"Failed to parse streaming event: {event_data}")
-                                            continue
+                                response_json = await response.json()
+                                transcript = response_json.get('text', '')
                                 
-                                # Calculate average confidence
-                                if confidence_count > 0:
-                                    avg_confidence = confidence_sum / confidence_count
+                                # Handle empty transcripts
+                                if not transcript.strip():
+                                    return None
                                 
-                                self.logger.debug(f"Full transcript: {full_transcript}")
-                                self.logger.debug(f"Average confidence: {avg_confidence}")
+                                # Calculate a reasonable confidence score
+                                # For OpenAI, since we don't have direct token-level confidence,
+                                # we use a fixed base confidence that's high for deterministic outputs
+                                confidence = 0.8
                                 
-                                # Create response object similar to Google API response
-                                return self.create_response_object(full_transcript, avg_confidence)
+                                # Create response object compatible with Google API format
+                                return self.create_response_object(transcript, confidence)
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")
@@ -346,10 +338,10 @@ class StreamingTranscription:
                     self.logger.warning(f"OpenAI API timeout for channel {channel}")
                     return None
                 except Exception as e:
-                    self.logger.error(f"Error in OpenAI streaming API: {str(e)}")
+                    self.logger.error(f"Error in OpenAI API: {str(e)}")
                     return None
         except Exception as e:
-            self.logger.error(f"Error in stream_transcribe_audio: {str(e)}")
+            self.logger.error(f"Error in transcribe_audio: {str(e)}")
             return None
 
     def create_response_object(self, transcript, confidence):
@@ -382,7 +374,7 @@ class StreamingTranscription:
         
         alternative = Alternative(
             transcript=transcript,
-            confidence=confidence,  # Use calculated confidence
+            confidence=confidence,
             words=words
         )
         

@@ -18,14 +18,9 @@ def get_openai_language_code(lang: str) -> str:
         lang: The BCP-47 language code
         
     Returns:
-        A language code compatible with OpenAI's speech API, or None for languages that
-        should be handled via prompt instead of the language parameter.
+        A language code compatible with OpenAI's speech API
     """
     normalized = normalize_language_code(lang)
-    
-    # Special handling for Zulu - use prompt instead of language parameter
-    if normalized.startswith('zu-') or normalized == 'zu':
-        return None
     
     # Dictionary mapping BCP-47 codes to OpenAI-compatible language codes
     language_mapping = {
@@ -104,34 +99,83 @@ def get_openai_language_code(lang: str) -> str:
     # Otherwise return as is (likely already a simple ISO code)
     return normalized.lower()
 
-def get_language_name(lang: str) -> str:
+# Add a list of languages that OpenAI doesn't support by code but can handle via prompts
+OPENAI_UNSUPPORTED_LANGUAGE_CODES = {
+    "zu": "Zulu",
+    "zu-ZA": "Zulu",
+    # Add other unsupported languages as needed
+}
+
+# Language-specific prompts for unsupported languages
+# Include both the native language prompt and the English description
+LANGUAGE_SPECIFIC_PROMPTS = {
+    "zu": {
+        "native": "Loku kuqoshwa kwenkulumo yocingo lokusiza amakhasimende. Ikhasimende lingaxoxa ngezinkinga ezimayelana nezinsizakalo noma imikhiqizo. Lo mbhalo uzohunyushelwa esiZulwini.",
+        "english": "This is a customer service call recording. The customer may be discussing problems with services or products. This transcript is in Zulu language."
+    },
+    "zu-ZA": {
+        "native": "Loku kuqoshwa kwenkulumo yocingo lokusiza amakhasimende. Ikhasimende lingaxoxa ngezinkinga ezimayelana nezinsizakalo noma imikhiqizo. Lo mbhalo uzohunyushelwa esiZulwini.",
+        "english": "This is a customer service call recording. The customer may be discussing problems with services or products. This transcript is in Zulu language."
+    },
+}
+
+def is_openai_unsupported_language(lang: str) -> bool:
     """
-    Get a human-readable language name for a given language code.
+    Check if a language is known to be unsupported by code in OpenAI's API.
     
     Args:
-        lang: The language code (e.g., "zu-ZA", "en-US")
+        lang: The language code to check
         
     Returns:
-        A human-readable language name
+        True if the language is known to be unsupported by code but can be handled via prompt
     """
     normalized = normalize_language_code(lang)
+    code = normalized.split('-')[0].lower() if '-' in normalized else normalized.lower()
     
-    # Map language codes to human-readable names
-    language_names = {
-        "zu": "Zulu (isiZulu)",
-        "zu-ZA": "Zulu (isiZulu) from South Africa",
-        # Add more mappings as needed
-    }
+    return code in OPENAI_UNSUPPORTED_LANGUAGE_CODES or normalized in OPENAI_UNSUPPORTED_LANGUAGE_CODES
+
+def get_language_name_for_prompt(lang: str) -> str:
+    """
+    Get the full language name for a given language code to use in prompts.
     
-    # If we have a specific mapping, use it
-    if normalized in language_names:
-        return language_names[normalized]
+    Args:
+        lang: The language code
+        
+    Returns:
+        The full language name suitable for use in prompts
+    """
+    normalized = normalize_language_code(lang)
+    code = normalized.split('-')[0].lower() if '-' in normalized else normalized.lower()
     
-    # If it's a hyphenated code and we don't have a specific mapping
-    if "-" in normalized:
-        primary_lang = normalized.split("-")[0]
-        if primary_lang in language_names:
-            return language_names[primary_lang]
+    # Check first for the full normalized code
+    if normalized in OPENAI_UNSUPPORTED_LANGUAGE_CODES:
+        return OPENAI_UNSUPPORTED_LANGUAGE_CODES[normalized]
     
-    # Default case: just return the code
-    return normalized
+    # Then check for just the language part
+    if code in OPENAI_UNSUPPORTED_LANGUAGE_CODES:
+        return OPENAI_UNSUPPORTED_LANGUAGE_CODES[code]
+    
+    # If not found, return a default based on the code
+    return f"Language code {code}"
+
+def get_language_specific_prompt(lang: str) -> str:
+    """
+    Get a language-specific prompt template for unsupported languages.
+    
+    Args:
+        lang: The language code
+        
+    Returns:
+        A prompt template in the target language if available, otherwise in English
+    """
+    normalized = normalize_language_code(lang)
+    code = normalized.split('-')[0].lower() if '-' in normalized else normalized.lower()
+    
+    # Look for language-specific prompt template
+    if normalized in LANGUAGE_SPECIFIC_PROMPTS:
+        return LANGUAGE_SPECIFIC_PROMPTS[normalized]["native"]
+    elif code in LANGUAGE_SPECIFIC_PROMPTS:
+        return LANGUAGE_SPECIFIC_PROMPTS[code]["native"]
+    
+    # Fallback to English for unknown languages
+    return "This is a customer service call. The customer may be discussing problems with services or products."

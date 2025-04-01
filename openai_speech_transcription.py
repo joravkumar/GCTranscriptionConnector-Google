@@ -11,6 +11,7 @@ import aiohttp
 import logging
 from collections import deque
 import math
+import re
 
 from config import (
     OPENAI_API_KEY,
@@ -23,6 +24,25 @@ from language_mapping import (
     get_language_name_for_prompt,
     get_language_specific_prompt
 )
+
+# Known spurious transcription artifacts that should be filtered
+KNOWN_ARTIFACTS = [
+    "context:", 
+    "ring", 
+    "context",
+    "begin",
+    "beep",
+    "[beep]",
+    "[ring]"
+]
+
+# Regular expressions for more complex pattern matching
+ARTIFACT_PATTERNS = [
+    r"^\s*context:?\s*",  # Matches "context:" or "context" at the start
+    r"^\s*ring\s*",       # Matches "ring" at the start
+    r"^\s*\[?beep\]?\s*", # Matches "beep" or "[beep]" at the start
+    r"^\s*\[?ring\]?\s*"  # Matches "ring" or "[ring]" at the start
+]
 
 class MockResult:
     def __init__(self):
@@ -85,6 +105,13 @@ class StreamingTranscription:
         
         # Track last utterance to prevent duplicates
         self.last_transcripts = ["" for _ in range(channels)]
+        
+        # Initial audio discarding to prevent artifacts from call setup sounds
+        self.initial_frames_processed = [0 for _ in range(channels)]
+        self.skip_initial_frames = 5  # Skip first 5 frames to avoid beeps/connection sounds
+
+        # Minimum confidence threshold for tokens (to filter out uncertain transcriptions)
+        self.token_confidence_threshold = 0.2
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -118,6 +145,12 @@ class StreamingTranscription:
                         if len(self.accumulated_audio[channel]) > 0:
                             self._process_accumulated_audio(channel, loop)
                         break
+                    
+                    # Skip initial frames to avoid startup noises/beeps
+                    if self.initial_frames_processed[channel] < self.skip_initial_frames:
+                        self.initial_frames_processed[channel] += 1
+                        self.logger.debug(f"Channel {channel}: Skipping initial frame {self.initial_frames_processed[channel]} to avoid startup artifacts")
+                        continue
                     
                     # Approximate frame duration
                     frame_duration = len(audio_chunk) / 16000.0  # 8000 Hz * 2 bytes per sample
@@ -206,10 +239,17 @@ class StreamingTranscription:
                         if result.results and result.results[0].alternatives:
                             transcript_text = result.results[0].alternatives[0].transcript
                         
+                        # Apply filtering to remove spurious artifacts
+                        filtered_transcript = self._filter_spurious_artifacts(transcript_text)
+                        
+                        # Update the transcript in the result
+                        if result.results and result.results[0].alternatives and filtered_transcript:
+                            result.results[0].alternatives[0].transcript = filtered_transcript
+                        
                         # Only send if non-empty and different from last transcript
-                        if transcript_text and transcript_text != self.last_transcripts[channel]:
+                        if filtered_transcript and filtered_transcript != self.last_transcripts[channel]:
                             self.response_queues[channel].put(result)
-                            self.last_transcripts[channel] = transcript_text
+                            self.last_transcripts[channel] = filtered_transcript
                 except Exception as e:
                     self.logger.error(f"Error in OpenAI streaming transcription: {e}")
                 finally:
@@ -226,6 +266,30 @@ class StreamingTranscription:
             self.logger.error(f"Error processing accumulated audio: {e}")
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
+
+    def _filter_spurious_artifacts(self, transcript):
+        """Filter out known spurious artifacts from transcripts"""
+        if not transcript:
+            return transcript
+            
+        # First apply regex patterns to filter out complex patterns
+        for pattern in ARTIFACT_PATTERNS:
+            transcript = re.sub(pattern, "", transcript)
+            
+        # Then check for exact matches at beginning of transcript
+        for artifact in KNOWN_ARTIFACTS:
+            # Full line is the artifact
+            if transcript.strip() == artifact:
+                return ""
+            
+            # Beginning of line starts with the artifact
+            if transcript.strip().startswith(artifact + " "):
+                transcript = transcript.replace(artifact + " ", "", 1)
+            
+        # Remove any remaining duplicated spaces
+        transcript = re.sub(r'\s+', ' ', transcript).strip()
+        
+        return transcript
 
     def _write_wav_file(self, temp_wav, audio_data):
         """Write PCM16 data to a WAV file"""
@@ -290,6 +354,9 @@ class StreamingTranscription:
                 if self.is_unsupported_language:
                     # For unsupported languages, use a language-specific prompt
                     prompt = get_language_specific_prompt(self.language)
+                    # Add instruction to ignore beeps and system sounds
+                    base_prompt = prompt
+                    prompt = f"{base_prompt} Ignore initial beeps, rings, and system sounds."
                     self.logger.info(f"Using language-specific prompt for {self.language_prompt}: '{prompt}'")
                     form_data.add_field('prompt', prompt)
                     
@@ -301,7 +368,8 @@ class StreamingTranscription:
                         form_data.add_field('language', openai_lang)
                     
                     # Add contextual prompt for service call transcriptions
-                    prompt = "This is a customer service call. The customer may be discussing problems with services or products."
+                    # Include instruction to ignore beeps/rings/system sounds
+                    prompt = "This is a customer service call. The customer may be discussing problems with services or products. Ignore initial beeps, rings, and system sounds."
                     form_data.add_field('prompt', prompt)
                 
                 full_transcript = ""
@@ -309,6 +377,7 @@ class StreamingTranscription:
                 avg_confidence = 0.9  # Default
                 confidence_sum = 0
                 confidence_count = 0
+                low_confidence_tokens = []
                 
                 try:
                     async with aiohttp.ClientSession() as session:
@@ -335,9 +404,16 @@ class StreamingTranscription:
                                                 # Extract logprobs for confidence
                                                 if 'logprobs' in event_json:
                                                     for logprob in event_json['logprobs']:
+                                                        token = logprob.get('token', '')
                                                         token_logprob = logprob.get('logprob', 0)
                                                         # Convert logprob to linear probability and cap at 0.99
                                                         token_confidence = min(0.99, math.exp(token_logprob))
+                                                        
+                                                        # Check if token has low confidence (might be an artifact)
+                                                        if token_confidence < self.token_confidence_threshold:
+                                                            low_confidence_tokens.append(token)
+                                                            self.logger.debug(f"Low confidence token: '{token}' with confidence {token_confidence:.4f}")
+                                                        
                                                         confidence_sum += token_confidence
                                                         confidence_count += 1
                                                 
@@ -348,8 +424,15 @@ class StreamingTranscription:
                                                 # Calculate final confidence from logprobs
                                                 if 'logprobs' in event_json and event_json['logprobs']:
                                                     for logprob in event_json['logprobs']:
+                                                        token = logprob.get('token', '')
                                                         token_logprob = logprob.get('logprob', 0)
                                                         token_confidence = min(0.99, math.exp(token_logprob))
+                                                        
+                                                        # Check if token has low confidence
+                                                        if token_confidence < self.token_confidence_threshold:
+                                                            low_confidence_tokens.append(token)
+                                                            self.logger.debug(f"Low confidence token (final): '{token}' with confidence {token_confidence:.4f}")
+                                                        
                                                         confidence_sum += token_confidence
                                                         confidence_count += 1
                                                 
@@ -361,11 +444,17 @@ class StreamingTranscription:
                                 if confidence_count > 0:
                                     avg_confidence = confidence_sum / confidence_count
                                 
-                                self.logger.debug(f"Full transcript: {full_transcript}")
+                                # Filter out spurious artifacts from the transcript
+                                filtered_transcript = self._filter_spurious_artifacts(full_transcript)
+                                
+                                self.logger.debug(f"Original transcript: {full_transcript}")
+                                self.logger.debug(f"Filtered transcript: {filtered_transcript}")
                                 self.logger.debug(f"Average confidence: {avg_confidence}")
+                                if low_confidence_tokens:
+                                    self.logger.debug(f"Low confidence tokens: {', '.join(low_confidence_tokens)}")
                                 
                                 # Create response object similar to Google API response
-                                return self.create_response_object(full_transcript, avg_confidence)
+                                return self.create_response_object(filtered_transcript, avg_confidence)
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")

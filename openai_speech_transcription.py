@@ -16,7 +16,7 @@ from config import (
     OPENAI_API_KEY,
     OPENAI_SPEECH_MODEL
 )
-from language_mapping import normalize_language_code, get_openai_language_code
+from language_mapping import normalize_language_code, get_openai_language_code, get_language_name
 
 class MockResult:
     def __init__(self):
@@ -243,7 +243,11 @@ class StreamingTranscription:
         try:
             openai_lang = self.openai_language
             self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
-            self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
+            
+            if openai_lang is None:
+                self.logger.info(f"Language '{self.language}' will be included in prompt instead of language parameter")
+            else:
+                self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
             
             url = "https://api.openai.com/v1/audio/transcriptions"
             headers = {
@@ -268,12 +272,18 @@ class StreamingTranscription:
                 # Set temperature to 0 for most deterministic results
                 form_data.add_field('temperature', '0')
                 
-                # Only specify language if it's not empty
-                if openai_lang:
-                    form_data.add_field('language', openai_lang)
-                
                 # Add contextual prompt for service call transcriptions
                 prompt = "This is a customer service call. The customer may be discussing problems with services or products."
+                
+                # If openai_lang is None, add language to prompt
+                if openai_lang is None:
+                    language_name = get_language_name(self.language)
+                    prompt += f" The audio is in the {language_name} language."
+                    self.logger.info(f"Added language to prompt: '{language_name}'")
+                else:
+                    # Only specify language if not None
+                    form_data.add_field('language', openai_lang)
+                
                 form_data.add_field('prompt', prompt)
                 
                 full_transcript = ""

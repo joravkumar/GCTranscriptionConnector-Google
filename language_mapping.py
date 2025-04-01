@@ -84,6 +84,8 @@ def get_openai_language_code(lang: str) -> str:
         "he-IL": "he",
         "id-ID": "id",
         "ro-RO": "ro",
+        "zu-ZA": "zu",
+        "ms-MY": "ms"
     }
     
     # If the language is in our mapping, return its value

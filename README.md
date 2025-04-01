@@ -171,6 +171,9 @@ The application is built around the following core components:
   - Processes response chunks to build complete transcripts with confidence scores
   - Includes language code mapping from BCP-47 to ISO formats
   - Generates synthetic word-level timing information for compatibility with Genesys AudioHook
+  - Artifact filtering to prevent spurious words/phrases in transcripts
+  - Initial frame skipping to avoid connection sounds/beeps
+  - Low confidence token filtering
 
 - **google_gemini_translation.py**  
   Implements the translate_with_gemini function for translating text using Google Gemini.
@@ -181,6 +184,8 @@ The application is built around the following core components:
   Contains functions for normalizing language codes:
   - `normalize_language_code`: Normalizes language codes to BCP-47 format (e.g., "es-es" → "es-ES").
   - `get_openai_language_code`: Maps BCP-47 codes to ISO 639-1/639-3 codes compatible with OpenAI's API.
+  - `is_openai_unsupported_language`: Identifies languages not directly supported by OpenAI's API.
+  - `get_language_specific_prompt`: Provides native language prompts for unsupported languages.
 
 - **rate_limiter.py**  
   Provides an asynchronous rate limiter (RateLimiter) to throttle message sending.
@@ -238,6 +243,12 @@ The application is built around the following core components:
     - Energy thresholds to avoid processing silence
     - Buffer overflow prevention
     - Duplicate transcript prevention
+  - Transcript Quality Improvements:
+    - Skips initial audio frames to avoid connection sounds/beeps
+    - Filters out known spurious artifacts ("context:", "ring", etc.)
+    - Uses regex pattern matching to identify and remove common artifacts
+    - Filters low-confidence tokens that might represent misinterpreted sounds
+    - Uses enhanced prompting to instruct the model to ignore system sounds
 
 - **Translation (Optional):**  
   - If `customConfig.enableTranslation` is set to true in the open message, the transcribed text is sent to Google Gemini for translation into the destination language.
@@ -281,6 +292,7 @@ This connector supports two speech recognition providers:
     - Response streaming for real-time results
     - Confidence scores derived from token logprobs
     - Synthetic word-level timing for Genesys compatibility
+    - Artifact filtering to prevent spurious transcripts
 
 - **gpt-4o-transcribe:**
   - Higher quality model for more accurate transcriptions
@@ -310,6 +322,14 @@ The connector automatically adapts to whichever provider and model is specified 
   - The connector automatically maps BCP-47 codes (e.g., "es-ES") to ISO codes (e.g., "es") before sending to OpenAI using the `get_openai_language_code` function.
   - This mapping covers all major language variants (Spanish, English, French, etc.) and gracefully handles unsupported codes.
   - This mapping is handled transparently, so you can continue using BCP-47 codes in your Genesys configuration.
+
+- **Unsupported Languages Handling:**
+  - For languages not officially supported by OpenAI's API (like Zulu/zu-ZA), the connector uses a special approach:
+    - Detects unsupported languages using the `is_openai_unsupported_language` function
+    - Omits the `language` parameter that would cause API errors
+    - Instead, includes a native language prompt (e.g., "Humusha ngesizulu (Mzansi Afrika)" for Zulu)
+    - The prompt is provided in the target language to help guide the model appropriately
+  - This approach allows transcription in languages that OpenAI doesn't explicitly support via their language parameter
 
 - **Destination Language:**  
   - Determined from the `language` field in the "open" message.
@@ -454,10 +474,6 @@ All configurable parameters are defined in `config.py` and loaded from environme
 
 - **Google Transcription: Random numbers in the transcription:**  
   - From time to time some arbitrary numbers show up in the transcription, totally unrelated to the conversation itself. It requires further investigation.
- 
-- **OpenAI Transcription: Spurious initial transcripts:**  
-  - Some arbitrary sentences included at the beginning, like "context:". It requires further investigation.
-  - This may be related to the contextual prompt provided during transcription.
 
 - **OpenAI Transcription: Synthetic word timing:**
   - Because OpenAI's Speech API doesn't provide word-level timing information, the connector generates synthetic timestamps based on transcript length.

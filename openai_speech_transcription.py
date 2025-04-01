@@ -16,7 +16,13 @@ from config import (
     OPENAI_API_KEY,
     OPENAI_SPEECH_MODEL
 )
-from language_mapping import normalize_language_code, get_openai_language_code, get_language_name
+from language_mapping import (
+    normalize_language_code, 
+    get_openai_language_code, 
+    is_openai_unsupported_language,
+    get_language_name_for_prompt,
+    get_language_specific_prompt
+)
 
 class MockResult:
     def __init__(self):
@@ -45,7 +51,15 @@ class StreamingTranscription:
         self.logger = logger
         self.language = normalize_language_code(language)
         self.openai_language = get_openai_language_code(self.language)
-        self.logger.info(f"Initialized StreamingTranscription with language={self.language}, openai_language={self.openai_language}")
+        self.is_unsupported_language = is_openai_unsupported_language(self.language)
+        
+        if self.is_unsupported_language:
+            self.language_prompt = get_language_name_for_prompt(self.language)
+            self.logger.info(f"Initialized StreamingTranscription with language={self.language}, unsupported by OpenAI API; using language name '{self.language_prompt}' in prompt")
+        else:
+            self.language_prompt = None
+            self.logger.info(f"Initialized StreamingTranscription with language={self.language}, openai_language={self.openai_language}")
+            
         self.channels = channels
         self.audio_queues = [queue.Queue() for _ in range(channels)]
         self.response_queues = [queue.Queue() for _ in range(channels)]
@@ -242,11 +256,11 @@ class StreamingTranscription:
         """Stream transcribe audio using OpenAI's streaming API"""
         try:
             openai_lang = self.openai_language
-            self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
             
-            if openai_lang is None:
-                self.logger.info(f"Language '{self.language}' will be included in prompt instead of language parameter")
+            if self.is_unsupported_language:
+                self.logger.info(f"Using special handling for unsupported language {self.language}: adding '{self.language_prompt}' to prompt instead of language code")
             else:
+                self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
                 self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
             
             url = "https://api.openai.com/v1/audio/transcriptions"
@@ -272,19 +286,23 @@ class StreamingTranscription:
                 # Set temperature to 0 for most deterministic results
                 form_data.add_field('temperature', '0')
                 
-                # Add contextual prompt for service call transcriptions
-                prompt = "This is a customer service call. The customer may be discussing problems with services or products."
-                
-                # If openai_lang is None, add language to prompt
-                if openai_lang is None:
-                    language_name = get_language_name(self.language)
-                    prompt += f" The audio is in the {language_name} language."
-                    self.logger.info(f"Added language to prompt: '{language_name}'")
+                # Build prompt based on language support status
+                if self.is_unsupported_language:
+                    # For unsupported languages, use a language-specific prompt
+                    prompt = get_language_specific_prompt(self.language)
+                    self.logger.info(f"Using language-specific prompt for {self.language_prompt}: '{prompt}'")
+                    form_data.add_field('prompt', prompt)
+                    
+                    # Don't send the language parameter for unsupported languages
+                    self.logger.info(f"Omitting language parameter for unsupported language {self.language}")
                 else:
-                    # Only specify language if not None
-                    form_data.add_field('language', openai_lang)
-                
-                form_data.add_field('prompt', prompt)
+                    # Only specify language if it's not empty and is a supported language
+                    if openai_lang:
+                        form_data.add_field('language', openai_lang)
+                    
+                    # Add contextual prompt for service call transcriptions
+                    prompt = "This is a customer service call. The customer may be discussing problems with services or products."
+                    form_data.add_field('prompt', prompt)
                 
                 full_transcript = ""
                 words = []
@@ -351,6 +369,9 @@ class StreamingTranscription:
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")
+                                # If the error is related to language, log more details for debugging
+                                if "language" in error_text.lower():
+                                    self.logger.error(f"Language-related error. Used language: {self.language}, OpenAI language: {openai_lang}, Is unsupported: {self.is_unsupported_language}")
                                 return None
                 except asyncio.TimeoutError:
                     self.logger.warning(f"OpenAI API timeout for channel {channel}")

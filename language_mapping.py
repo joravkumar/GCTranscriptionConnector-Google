@@ -18,9 +18,14 @@ def get_openai_language_code(lang: str) -> str:
         lang: The BCP-47 language code
         
     Returns:
-        A language code compatible with OpenAI's speech API
+        A language code compatible with OpenAI's speech API, or None for languages that
+        should be handled via prompt instead of the language parameter.
     """
     normalized = normalize_language_code(lang)
+    
+    # Special handling for Zulu - use prompt instead of language parameter
+    if normalized.startswith('zu-') or normalized == 'zu':
+        return None
     
     # Dictionary mapping BCP-47 codes to OpenAI-compatible language codes
     language_mapping = {
@@ -98,3 +103,35 @@ def get_openai_language_code(lang: str) -> str:
     
     # Otherwise return as is (likely already a simple ISO code)
     return normalized.lower()
+
+def get_language_name(lang: str) -> str:
+    """
+    Get a human-readable language name for a given language code.
+    
+    Args:
+        lang: The language code (e.g., "zu-ZA", "en-US")
+        
+    Returns:
+        A human-readable language name
+    """
+    normalized = normalize_language_code(lang)
+    
+    # Map language codes to human-readable names
+    language_names = {
+        "zu": "Zulu (isiZulu)",
+        "zu-ZA": "Zulu (isiZulu) from South Africa",
+        # Add more mappings as needed
+    }
+    
+    # If we have a specific mapping, use it
+    if normalized in language_names:
+        return language_names[normalized]
+    
+    # If it's a hyphenated code and we don't have a specific mapping
+    if "-" in normalized:
+        primary_lang = normalized.split("-")[0]
+        if primary_lang in language_names:
+            return language_names[primary_lang]
+    
+    # Default case: just return the code
+    return normalized

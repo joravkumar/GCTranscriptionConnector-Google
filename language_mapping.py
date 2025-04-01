@@ -110,12 +110,12 @@ OPENAI_UNSUPPORTED_LANGUAGE_CODES = {
 # Include both the native language prompt and the English description
 LANGUAGE_SPECIFIC_PROMPTS = {
     "zu": {
-        "native": "Loku kuqoshwa kwenkulumo yocingo lokusiza amakhasimende. Ikhasimende lingaxoxa ngezinkinga ezimayelana nezinsizakalo noma imikhiqizo. Lo mbhalo uzohunyushelwa esiZulwini.",
-        "english": "This is a customer service call recording. The customer may be discussing problems with services or products. This transcript is in Zulu language."
+        "native": "Humusha ngesizulu (Mzansi Afrika)",
+        "english": "Transcribe to Zulu (South Africa)"
     },
     "zu-ZA": {
-        "native": "Loku kuqoshwa kwenkulumo yocingo lokusiza amakhasimende. Ikhasimende lingaxoxa ngezinkinga ezimayelana nezinsizakalo noma imikhiqizo. Lo mbhalo uzohunyushelwa esiZulwini.",
-        "english": "This is a customer service call recording. The customer may be discussing problems with services or products. This transcript is in Zulu language."
+        "native": "Humusha ngesizulu (Mzansi Afrika)",
+        "english": "Transcribe to Zulu (South Africa)"
     },
 }
 

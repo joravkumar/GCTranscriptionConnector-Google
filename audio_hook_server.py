@@ -7,7 +7,6 @@ import tempfile
 import audioop
 import logging
 from websockets.exceptions import ConnectionClosed
-from datetime import timedelta
 
 from config import (
     RATE_LIMIT_MAX_RETRIES,
@@ -17,8 +16,7 @@ from config import (
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
     SUPPORTED_LANGUAGES,
-    SPEECH_PROVIDER,
-    GOOGLE_SPEECH_MODEL
+    SPEECH_PROVIDER
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
@@ -106,7 +104,7 @@ class AudioHookServer:
 
             if retry_after is None and hasattr(self.ws, 'response_headers'):
                 http_retry_after = (
-                    self.ws.response_headers.get('Retry-After') or
+                    self.ws.response_headers.get('Retry-After') or 
                     self.ws.response_headers.get('retry-after')
                 )
                 if http_retry_after:
@@ -201,7 +199,7 @@ class AudioHookServer:
         if discarded_duration_str:
             try:
                 gap = parse_iso8601_duration(discarded_duration_str)
-                gap_samples = int(gap * 8000) # assuming 8kHz sample rate
+                gap_samples = int(gap * 8000)  # assuming 8kHz sample rate
                 self.offset_adjustment += gap_samples
                 self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment.")
             except ValueError as e:
@@ -219,7 +217,7 @@ class AudioHookServer:
     async def handle_resumed(self, msg: dict):
         if self.pause_start_time is not None:
             pause_duration = time.time() - self.pause_start_time
-            gap_samples = int(pause_duration * 8000) # assuming 8kHz sample rate
+            gap_samples = int(pause_duration * 8000)  # assuming 8kHz sample rate
             self.offset_adjustment += gap_samples
             self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment.")
             self.pause_start_time = None
@@ -423,250 +421,186 @@ class AudioHookServer:
 
         # Deinterleave stereo audio and feed to respective transcription instances
         if channels == 2:
-            left_channel = frame_bytes[0::2] # External channel
-            right_channel = frame_bytes[1::2] # Internal channel
+            left_channel = frame_bytes[0::2]  # External channel
+            right_channel = frame_bytes[1::2]  # Internal channel
             self.streaming_transcriptions[0].feed_audio(left_channel, 0)
-            self.streaming_transcriptions[1].feed_audio(right_channel, 1) # Use correct channel index
+            self.streaming_transcriptions[1].feed_audio(right_channel, 0)
         else:
             self.streaming_transcriptions[0].feed_audio(frame_bytes, 0)
 
         self.audio_buffer.append(frame_bytes)
 
     async def process_transcription_responses(self, channel):
-         while self.running:
-            response = self.streaming_transcriptions[channel].get_response(0) # Assuming one channel per instance
+        while self.running:
+            response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
             if response:
+                self.logger.info(f"Processing transcription response on channel {channel}: {response}")
                 if isinstance(response, Exception):
                     self.logger.error(f"Streaming recognition error on channel {channel}: {response}")
                     await self.disconnect_session(reason="error", info="Streaming recognition failed")
                     break
-
-                # --- Common variables ---
-                final_text = ""
-                overall_confidence = 0.9 # Default confidence
-                offset_str = "PT0S"
-                duration_str = "PT0S"
-                tokens = []
-                is_final = True # OpenAI and Google streaming mostly give final results per utterance
-                source_lang = self.input_language
-                dest_lang = self.destination_language if self.enable_translation else self.input_language
-
-                # --- Provider-specific processing ---
-                if SPEECH_PROVIDER == 'openai':
-                    if isinstance(response, tuple) and len(response) == 2:
-                        transcript_text, avg_confidence = response
-                        if not transcript_text:
-                            continue
-
-                        overall_confidence = avg_confidence if avg_confidence is not None else 0.9
-
-                        # Calculate offset and duration based on server's sample tracking
-                        effective_end_samples = self.total_samples - self.offset_adjustment
-                        words_list = transcript_text.split()
-
-                        # Estimate duration based on word count (heuristic)
-                        estimated_duration_seconds = max(0.1, min(15.0, len(words_list) * 0.4))
-                        overall_start_seconds = max(0.0, (effective_end_samples / 8000.0) - estimated_duration_seconds)
-
-                        offset_str = f"PT{overall_start_seconds:.3f}S"
-                        duration_str = f"PT{estimated_duration_seconds:.3f}S"
-                        final_text = transcript_text
-
-                        # Generate synthetic tokens
-                        if words_list:
-                            per_word_duration = estimated_duration_seconds / len(words_list) if len(words_list) > 0 else 0
+                for result in response.results:
+                    if not result.alternatives:
+                        continue
+                    alt = result.alternatives[0]
+                    transcript_text = alt.transcript
+                    source_lang = self.input_language
+                    # If translation is enabled, translate to destination language; otherwise, keep the transcript as is
+                    if self.enable_translation:
+                        dest_lang = self.destination_language
+                        translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
+                        if translated_text is None:
+                            self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
+                            continue  # Skip sending the event if translation failed
+                    else:
+                        dest_lang = source_lang
+                        translated_text = transcript_text
+    
+                    # Calculate overall offset and duration from the original transcription
+                    adjustment_seconds = self.offset_adjustment / 8000.0
+                    
+                    # Set default confidence based on model type
+                    default_confidence = 1.0
+                    
+                    # Check if we have proper word-level timing (available in both Chirp and Chirp 2)
+                    use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
+                        hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
+                    )
+                    
+                    if use_word_timings:
+                        # We have word-level timings 
+                        overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
+                        overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
+                        overall_duration = overall_end - overall_start
+                    else:
+                        # No word-level timings
+                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
+                        overall_duration = 0.0
+    
+                    offset_str = f"PT{overall_start:.2f}S"
+                    duration_str = f"PT{overall_duration:.2f}S"
+    
+                    # Use appropriate confidence values based on the speech provider
+                    from config import SPEECH_PROVIDER, GOOGLE_SPEECH_MODEL
+                    
+                    # Default confidence value
+                    overall_confidence = default_confidence
+                    
+                    # If using Google with Chirp 2, use the actual confidence
+                    if SPEECH_PROVIDER == 'google' and GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
+                        use_actual_confidence = True
+                        if hasattr(alt, "confidence") and alt.confidence is not None:
+                            overall_confidence = alt.confidence
+                    # If using OpenAI, we already set a reasonable confidence value
+                    elif SPEECH_PROVIDER == 'openai':
+                        if hasattr(alt, "confidence") and alt.confidence is not None:
+                            overall_confidence = alt.confidence
+                    
+                    # Build tokens based on whether translation is enabled and whether we have word-level data
+                    if self.enable_translation:
+                        # Split the translated text into individual words
+                        words_list = translated_text.split()
+                        if words_list and overall_duration > 0:
+                            per_word_duration = overall_duration / len(words_list)
+                            tokens = []
                             for i, word in enumerate(words_list):
-                                token_offset = overall_start_seconds + i * per_word_duration
+                                token_offset = overall_start + i * per_word_duration
+                                # Use appropriate confidence value
+                                confidence = overall_confidence
                                 tokens.append({
                                     "type": "word",
                                     "value": word,
-                                    "confidence": overall_confidence, # Use average confidence for all tokens
-                                    "offset": f"PT{token_offset:.3f}S",
-                                    "duration": f"PT{per_word_duration:.3f}S",
-                                    "language": source_lang # Assume source lang for now
+                                    "confidence": confidence,
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{per_word_duration:.2f}S",
+                                    "language": dest_lang
                                 })
                         else:
-                             # Handle empty transcript case if necessary, though filtered before
-                            pass
-
+                            tokens = [{
+                                "type": "word",
+                                "value": translated_text,
+                                "confidence": overall_confidence,
+                                "offset": offset_str,
+                                "duration": duration_str,
+                                "language": dest_lang
+                            }]
                     else:
-                        self.logger.warning(f"Unexpected response format from OpenAI provider: {response}")
-                        continue
-
-                else: # Google provider
-                    self.logger.info(f"Processing Google transcription response on channel {channel}: {response}")
-                    if not response.results or not response.results[0].alternatives:
-                        continue
-
-                    alt = response.results[0].alternatives[0]
-                    transcript_text = alt.transcript
-                    is_final = response.results[0].is_final
-
-                    # Calculate offset adjustment in seconds
-                    adjustment_seconds = self.offset_adjustment / 8000.0
-
-                    # Use actual word timings if available
-                    use_word_timings = hasattr(alt, "words") and alt.words and all(
-                        hasattr(w, "start_offset") and w.start_offset is not None and hasattr(w, "end_offset") and w.end_offset is not None for w in alt.words
-                    )
-
-                    if use_word_timings:
-                        # Use first word start and last word end for overall timing
-                        overall_start_seconds = alt.words[0].start_offset.total_seconds() - adjustment_seconds
-                        overall_end_seconds = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
-                        overall_duration_seconds = max(0.0, overall_end_seconds - overall_start_seconds)
-                        overall_start_seconds = max(0.0, overall_start_seconds) # Ensure not negative
-
-                        offset_str = f"PT{overall_start_seconds:.3f}S"
-                        duration_str = f"PT{overall_duration_seconds:.3f}S"
-
-                        # Set overall confidence
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
-                        elif GOOGLE_SPEECH_MODEL.lower() != 'chirp_2':
-                            overall_confidence = 1.0 # Default for non-Chirp2
-
-                        # Build tokens with actual timing
-                        for w in alt.words:
-                             token_start_seconds = w.start_offset.total_seconds() - adjustment_seconds
-                             token_end_seconds = w.end_offset.total_seconds() - adjustment_seconds
-                             token_duration_seconds = max(0.0, token_end_seconds - token_start_seconds)
-                             token_start_seconds = max(0.0, token_start_seconds)
-
-                             word_confidence = 1.0 # Default
-                             if hasattr(w, "confidence") and w.confidence is not None:
-                                 word_confidence = w.confidence
-
-                             tokens.append({
-                                 "type": "word",
-                                 "value": w.word,
-                                 "confidence": word_confidence,
-                                 "offset": f"PT{token_start_seconds:.3f}S",
-                                 "duration": f"PT{token_duration_seconds:.3f}S",
-                                 "language": source_lang
-                             })
-                    else:
-                         # No word-level timings (should be rare with Chirp/Chirp2 but handle anyway)
-                        effective_end_samples = self.total_samples - self.offset_adjustment
-                        overall_start_seconds = max(0.0, (effective_end_samples / 8000.0) - 1.0) # Estimate 1 sec duration
-                        overall_duration_seconds = 1.0
-
-                        offset_str = f"PT{overall_start_seconds:.3f}S"
-                        duration_str = f"PT{overall_duration_seconds:.3f}S"
-
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
-                        elif GOOGLE_SPEECH_MODEL.lower() != 'chirp_2':
-                             overall_confidence = 1.0
-
-                        # Create a single token for the whole transcript
-                        tokens.append({
-                            "type": "word",
-                            "value": transcript_text,
-                            "confidence": overall_confidence,
-                            "offset": offset_str,
-                            "duration": duration_str,
-                            "language": source_lang
-                        })
-
-                    final_text = transcript_text
-
-                # --- Translation (Common) ---
-                translated_text = final_text
-                if self.enable_translation:
-                    translated_text = await translate_with_gemini(final_text, source_lang, dest_lang, self.logger)
-                    if translated_text is None:
-                        self.logger.warning(f"Translation failed for text: '{final_text}'. Sending original transcript.")
-                        translated_text = final_text # Fallback to original
-                        dest_lang = source_lang # Revert dest_lang if translation failed
-                    else:
-                         # If translation succeeded, we need to regenerate synthetic tokens for the translated text
-                        if SPEECH_PROVIDER == 'openai' or (SPEECH_PROVIDER == 'google' and not use_word_timings):
-                            # Recalculate tokens based on translated words
-                            translated_words_list = translated_text.split()
+                        # Translation disabled: use the original word timings if available
+                        if use_word_timings:
                             tokens = []
-                            if translated_words_list:
-                                # Use the same overall timing calculated before translation
-                                current_overall_start = overall_start_seconds
-                                current_overall_duration = overall_duration_seconds
-                                per_word_duration = current_overall_duration / len(translated_words_list) if len(translated_words_list) > 0 else 0
-
-                                for i, word in enumerate(translated_words_list):
-                                    token_offset = current_overall_start + i * per_word_duration
-                                    tokens.append({
-                                        "type": "word",
-                                        "value": word,
-                                        "confidence": overall_confidence,
-                                        "offset": f"PT{token_offset:.3f}S",
-                                        "duration": f"PT{per_word_duration:.3f}S",
-                                        "language": dest_lang
-                                    })
-                            else:
-                                # Handle empty translation? Add a single token with overall timing.
-                                 tokens.append({
+                            for w in alt.words:
+                                token_offset = w.start_offset.total_seconds() - adjustment_seconds
+                                token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
+                                
+                                # Get word confidence
+                                word_confidence = default_confidence
+                                if hasattr(w, "confidence") and w.confidence is not None:
+                                    word_confidence = w.confidence
+                                    
+                                tokens.append({
                                     "type": "word",
-                                    "value": translated_text,
-                                    "confidence": overall_confidence,
-                                    "offset": offset_str,
-                                    "duration": duration_str,
+                                    "value": w.word,
+                                    "confidence": word_confidence,
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{token_duration:.2f}S",
                                     "language": dest_lang
-                                 })
-                        else: # Google with word timings - Update language in existing tokens
-                             for token in tokens:
-                                 token["language"] = dest_lang
-
-
-                # --- Construct and Send Event (Common) ---
-                if not translated_text or not tokens:
-                    self.logger.debug(f"Skipping empty transcript event for channel {channel}")
-                    continue
-
-                alternative = {
-                    "confidence": overall_confidence,
-                    **({"languages": [dest_lang]} if self.enable_translation else {}), # Report language only if translated
-                    "interpretations": [
-                        {
-                            "type": "display",
-                            "transcript": translated_text,
-                            "tokens": tokens
-                        }
-                    ]
-                }
-
-                channel_id = channel # Integer channel index
-
-                transcript_event = {
-                    "version": "2",
-                    "type": "event",
-                    "seq": self.server_seq + 1,
-                    "clientseq": self.client_seq,
-                    "id": self.session_id,
-                    "parameters": {
-                        "entities": [
+                                })
+                        else:
+                            # For models without word-level timing, use the overall timing for the whole transcript
+                            tokens = [{
+                                "type": "word",
+                                "value": transcript_text,
+                                "confidence": overall_confidence,
+                                "offset": offset_str,
+                                "duration": duration_str,
+                                "language": dest_lang
+                            }]
+    
+                    alternative = {
+                        "confidence": overall_confidence,
+                        **({"languages": [dest_lang]} if self.enable_translation else {}),
+                        "interpretations": [
                             {
-                                "type": "transcript",
-                                "data": {
-                                    "id": str(uuid.uuid4()),
-                                    "channelId": channel_id,
-                                    "isFinal": is_final,
-                                    "offset": offset_str,
-                                    "duration": duration_str,
-                                    "alternatives": [
-                                        alternative
-                                    ]
-                                }
+                                "type": "display",
+                                "transcript": translated_text,
+                                "tokens": tokens
                             }
                         ]
                     }
-                }
-                self.logger.info(f"Sending transcription event to Genesys (Channel {channel}): {json.dumps(transcript_event)}")
-                if await self._send_json(transcript_event):
-                    self.server_seq += 1
-                else:
-                    self.logger.debug("Transcript event dropped due to rate limiting or connection issues")
+    
+                    channel_id = channel  # Integer channel index
+    
+                    transcript_event = {
+                        "version": "2",
+                        "type": "event",
+                        "seq": self.server_seq + 1,
+                        "clientseq": self.client_seq,
+                        "id": self.session_id,
+                        "parameters": {
+                            "entities": [
+                                {
+                                    "type": "transcript",
+                                    "data": {
+                                        "id": str(uuid.uuid4()),
+                                        "channelId": channel_id,
+                                        "isFinal": result.is_final,
+                                        "offset": offset_str,
+                                        "duration": duration_str,
+                                        "alternatives": [
+                                            alternative
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                    self.logger.info(f"Sending transcription event to Genesys: {json.dumps(transcript_event)}")
+                    if await self._send_json(transcript_event):
+                        self.server_seq += 1
+                    else:
+                        self.logger.debug("Transcript event dropped due to rate limiting")
             else:
                 await asyncio.sleep(0.01)
-
 
     async def _send_json(self, msg: dict):
         try:
@@ -676,11 +610,11 @@ class AudioHookServer:
                     f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
                     f"Message type: {msg.get('type')}. Dropping to maintain compliance."
                 )
-                return False # Message not sent
+                return False  # Message not sent
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
-            return True # Message sent
+            return True  # Message sent
         except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False

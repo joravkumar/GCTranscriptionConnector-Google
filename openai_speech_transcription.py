@@ -21,7 +21,7 @@ from config import (
 from language_mapping import (
     normalize_language_code, 
     get_openai_language_code, 
-    is_openai_unsupported_language,
+    is_unsupported_language,
     get_language_name_for_prompt,
     get_language_specific_prompt
 )
@@ -384,7 +384,7 @@ class StreamingTranscription:
                                                     confidence_sum += token_confidence
                                                     confidence_count += 1
                                             
-										elif event_type == 'transcript.text.done':
+                                        elif event_type == 'transcript.text.done':
                                             full_transcript = event_json.get('text', '')
                                             
                                             if 'logprobs' in event_json and event_json['logprobs']:

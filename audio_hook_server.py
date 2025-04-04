@@ -22,7 +22,6 @@ from config import (
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 
-# Import language normalization function
 from language_mapping import normalize_language_code
 from google_gemini_translation import translate_with_gemini
 
@@ -53,36 +52,25 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.last_frame_time = 0
 
-        # Total samples processed for offset calculation
         self.total_samples = 0
-        # Offset adjustment for control messages (discarded/paused)
         self.offset_adjustment = 0
-        # Timestamp when pause started, if any
         self.pause_start_time = None
 
-        # New language attributes:
-        # input_language comes from customConfig.inputLanguage (for transcription)
-        # destination_language comes from the "language" field (for translation)
         self.input_language = "en-US"
         self.destination_language = "en-US"
 
-        # Translation enable flag from customConfig.enableTranslation
         self.enable_translation = False
         
-        # Speech provider selection, will be set from customConfig.transcriptionVendor
         self.speech_provider = DEFAULT_SPEECH_PROVIDER
         
-        # The StreamingTranscription class, which will be dynamically loaded
         self.StreamingTranscription = None
 
-        # Streaming transcription for each channel
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
 
         self.logger.info(f"New session started: {self.session_id}")
 
     def _load_transcription_provider(self, provider_name=None):
-        """Dynamically load the appropriate transcription provider module."""
         provider = provider_name or self.speech_provider
         provider = provider.lower()
         
@@ -96,12 +84,11 @@ class AudioHookServer:
             self.logger.info(f"Loaded transcription provider: {provider}")
         except ImportError as e:
             self.logger.error(f"Failed to load transcription provider '{provider}': {e}")
-            # Fall back to Google if the requested provider fails to load
             if provider != 'google':
                 self.logger.warning(f"Falling back to Google transcription provider")
                 self._load_transcription_provider('google')
             else:
-                raise  # If Google also fails, let the error propagate
+                raise
 
     async def handle_error(self, msg: dict):
         error_code = msg["parameters"].get("code")
@@ -249,22 +236,16 @@ class AudioHookServer:
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
 
-        # Extract customConfig from the open message
         custom_config = msg["parameters"].get("customConfig", {})
 
-        # Set input_language from customConfig.inputLanguage, default to "en-US"
         self.input_language = normalize_language_code(custom_config.get("inputLanguage", "en-US"))
 
-        # Set enable_translation from customConfig.enableTranslation, default to False
         self.enable_translation = custom_config.get("enableTranslation", False)
 
-        # Set destination_language from the "language" field
         self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
         
-        # Set speech_provider from customConfig.transcriptionVendor, default to DEFAULT_SPEECH_PROVIDER
         self.speech_provider = custom_config.get("transcriptionVendor", DEFAULT_SPEECH_PROVIDER)
         
-        # Load the appropriate transcription provider module
         self._load_transcription_provider(self.speech_provider)
 
         is_probe = (
@@ -274,7 +255,6 @@ class AudioHookServer:
 
         if is_probe:
             self.logger.info("Detected probe connection")
-            # Prepare supported languages list from the comma-separated config value
             supported_langs = [lang.strip() for lang in SUPPORTED_LANGUAGES.split(",")]
             opened_msg = {
                 "version": "2",
@@ -342,12 +322,10 @@ class AudioHookServer:
             return
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
-        # Determine number of channels
         channels = len(self.negotiated_media.get("channels", [])) if self.negotiated_media and "channels" in self.negotiated_media else 1
         if channels == 0:
             channels = 1
 
-        # Initialize streaming transcription for each channel as mono using the input language
         self.streaming_transcriptions = [self.StreamingTranscription(self.input_language, 1, self.logger) for _ in range(channels)]
         for transcription in self.streaming_transcriptions:
             transcription.start_streaming()
@@ -438,16 +416,13 @@ class AudioHookServer:
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
 
-        # Compute how many "sample times" based on negotiated channels
         channels = len(self.negotiated_media.get("channels", [])) if self.negotiated_media and "channels" in self.negotiated_media else 1
         if channels == 0:
             channels = 1
 
-        # For PCMU, each channel is 1 byte per sample time
         sample_times = len(frame_bytes) // channels
         self.total_samples += sample_times
 
-        # Deinterleave stereo audio and feed to respective transcription instances
         if channels == 2:
             left_channel = frame_bytes[0::2]  # External channel
             right_channel = frame_bytes[1::2]  # Internal channel
@@ -473,7 +448,6 @@ class AudioHookServer:
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
                     source_lang = self.input_language
-                    # If translation is enabled, translate to destination language; otherwise, keep the transcript as is
                     if self.enable_translation:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
@@ -484,56 +458,43 @@ class AudioHookServer:
                         dest_lang = source_lang
                         translated_text = transcript_text
     
-                    # Calculate overall offset and duration from the original transcription
                     adjustment_seconds = self.offset_adjustment / 8000.0
                     
-                    # Set default confidence based on model type
                     default_confidence = 1.0
                     
-                    # Check if we have proper word-level timing (available in both Chirp and Chirp 2)
                     use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
                         hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
                     )
                     
                     if use_word_timings:
-                        # We have word-level timings 
                         overall_start = alt.words[0].start_offset.total_seconds()
                         overall_end = alt.words[-1].end_offset.total_seconds()
                         overall_duration = overall_end - overall_start
                     else:
-                        # No word-level timings - should never happen as we always create synthetic timings
                         self.logger.warning("No word-level timings found, using fallback")
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
                         overall_duration = 1.0  # Default duration
     
-                    # Apply the offset adjustment to the overall start time
-                    # For both Google and OpenAI, we want to subtract the adjustment
                     overall_start -= adjustment_seconds
                     
-                    # Ensure we don't have negative start times
                     if overall_start < 0:
                         overall_start = 0
                     
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
     
-                    # Default confidence value
                     overall_confidence = default_confidence
                     
-                    # If the model has confidence information, use it
-                    if hasattr(alt, "confidence") and alt.confidence is not None:
+                    if hasattr(alt, "confidence") and alt.confidence is not None and alt.confidence > 0.0:
                         overall_confidence = alt.confidence
                     
-                    # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
-                        # Split the translated text into individual words
                         words_list = translated_text.split()
                         if words_list and overall_duration > 0:
                             per_word_duration = overall_duration / len(words_list)
                             tokens = []
                             for i, word in enumerate(words_list):
                                 token_offset = overall_start + i * per_word_duration
-                                # Use appropriate confidence value
                                 confidence = overall_confidence
                                 tokens.append({
                                     "type": "word",
@@ -553,21 +514,17 @@ class AudioHookServer:
                                 "language": dest_lang
                             }]
                     else:
-                        # Translation disabled: use the original word timings if available
                         if use_word_timings:
                             tokens = []
                             for w in alt.words:
-                                # Get absolute token offset time, then subtract the adjustment
                                 token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
                                 
-                                # Ensure we don't have negative token offsets 
                                 if token_offset < 0:
                                     token_offset = 0
                                 
-                                # Get word confidence
                                 word_confidence = default_confidence
-                                if hasattr(w, "confidence") and w.confidence is not None:
+                                if hasattr(w, "confidence") and w.confidence is not None and w.confidence > 0.0:
                                     word_confidence = w.confidence
                                     
                                 tokens.append({
@@ -579,7 +536,6 @@ class AudioHookServer:
                                     "language": dest_lang
                                 })
                         else:
-                            # For models without word-level timing, use the overall timing for the whole transcript
                             tokens = [{
                                 "type": "word",
                                 "value": transcript_text,

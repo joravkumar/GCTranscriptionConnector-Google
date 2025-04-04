@@ -77,7 +77,7 @@ class AudioHookServer:
         try:
             if provider == 'openai':
                 module = importlib.import_module('openai_speech_transcription')
-            else:  # default to google
+            else:
                 module = importlib.import_module('google_speech_transcription')
                 
             self.StreamingTranscription = module.StreamingTranscription
@@ -208,7 +208,7 @@ class AudioHookServer:
         if discarded_duration_str:
             try:
                 gap = parse_iso8601_duration(discarded_duration_str)
-                gap_samples = int(gap * 8000)  # assuming 8kHz sample rate
+                gap_samples = int(gap * 8000)
                 self.offset_adjustment += gap_samples
                 self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment.")
             except ValueError as e:
@@ -226,7 +226,7 @@ class AudioHookServer:
     async def handle_resumed(self, msg: dict):
         if self.pause_start_time is not None:
             pause_duration = time.time() - self.pause_start_time
-            gap_samples = int(pause_duration * 8000)  # assuming 8kHz sample rate
+            gap_samples = int(pause_duration * 8000)
             self.offset_adjustment += gap_samples
             self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment.")
             self.pause_start_time = None
@@ -424,8 +424,8 @@ class AudioHookServer:
         self.total_samples += sample_times
 
         if channels == 2:
-            left_channel = frame_bytes[0::2]  # External channel
-            right_channel = frame_bytes[1::2]  # Internal channel
+            left_channel = frame_bytes[0::2]
+            right_channel = frame_bytes[1::2]
             self.streaming_transcriptions[0].feed_audio(left_channel, 0)
             self.streaming_transcriptions[1].feed_audio(right_channel, 0)
         else:
@@ -435,7 +435,7 @@ class AudioHookServer:
 
     async def process_transcription_responses(self, channel):
         while self.running:
-            response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
+            response = self.streaming_transcriptions[channel].get_response(0)
             if response:
                 self.logger.info(f"Processing transcription response on channel {channel}: {response}")
                 if isinstance(response, Exception):
@@ -446,21 +446,23 @@ class AudioHookServer:
                     if not result.alternatives:
                         continue
                     alt = result.alternatives[0]
-                    transcript_text = alt.transcript
+                    transcript_text = alt.transcript.strip()
+                    if not transcript_text and self.speech_provider != 'openai':
+                        continue
                     source_lang = self.input_language
                     if self.enable_translation:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
                         if translated_text is None:
                             self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
-                            continue  # Skip sending the event if translation failed
+                            continue
                     else:
                         dest_lang = source_lang
                         translated_text = transcript_text
     
                     adjustment_seconds = self.offset_adjustment / 8000.0
                     
-                    default_confidence = 1.0
+                    default_confidence = 1.0 if self.speech_provider == 'openai' else 0.99
                     
                     use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
                         hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
@@ -473,7 +475,7 @@ class AudioHookServer:
                     else:
                         self.logger.warning("No word-level timings found, using fallback")
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        overall_duration = 1.0  # Default duration
+                        overall_duration = 1.0
     
                     overall_start -= adjustment_seconds
                     
@@ -557,7 +559,7 @@ class AudioHookServer:
                         ]
                     }
     
-                    channel_id = channel  # Integer channel index
+                    channel_id = channel
     
                     transcript_event = {
                         "version": "2",
@@ -599,11 +601,11 @@ class AudioHookServer:
                     f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
                     f"Message type: {msg.get('type')}. Dropping to maintain compliance."
                 )
-                return False  # Message not sent
+                return False
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
-            return True  # Message sent
+            return True
         except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False

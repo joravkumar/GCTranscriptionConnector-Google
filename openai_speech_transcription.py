@@ -65,10 +65,6 @@ class Word:
         self.start_offset = start_offset or timedelta(seconds=0)
         self.end_offset = end_offset or timedelta(seconds=1)
         self.confidence = confidence
-        
-    def __str__(self):
-        # Enhanced string representation with 5 decimal precision for debugging
-        return f"Word('{self.word}', start={self.start_offset.total_seconds():.5f}s, end={self.end_offset.total_seconds():.5f}s, conf={self.confidence:.5f})"
 
 class StreamingTranscription:
     def __init__(self, language: str, channels: int, logger):
@@ -96,18 +92,13 @@ class StreamingTranscription:
         self.last_process_time = [time.time() for _ in range(channels)]
         
         # VAD parameters for detecting speech segments
-        self.vad_threshold = 200  # RMS threshold for speech detection
+        self.vad_threshold = 200
         self.is_speech = [False for _ in range(channels)]
         self.silence_frames = [0 for _ in range(channels)]
         self.speech_frames = [0 for _ in range(channels)]
         
         # Silence duration to consider end of utterance (800ms)
-        self.silence_threshold_frames = 8  # 8 frames at 100ms = 800ms of silence
-        
-        # Enhanced parameters for more accurate speech detection
-        self.energy_history = [deque(maxlen=10) for _ in range(channels)]
-        self.adaptive_threshold = [self.vad_threshold for _ in range(channels)]
-        self.silence_energy_threshold = 150  # Lower threshold to ensure we don't clip speech
+        self.silence_threshold_frames = 8
         
         # Keep track of accumulated audio for streaming
         self.accumulated_audio = [bytearray() for _ in range(channels)]
@@ -164,31 +155,21 @@ class StreamingTranscription:
                     # Approximate frame duration
                     frame_duration = len(audio_chunk) / 16000.0  # 8000 Hz * 2 bytes per sample
                     
-                    # Check audio energy for VAD with enhanced precision
+                    # Check audio energy for VAD
                     rms = audioop.rms(audio_chunk, 2)
-                    
-                    # Update energy history and calculate adaptive threshold
-                    self.energy_history[channel].append(rms)
-                    if len(self.energy_history[channel]) >= 5:
-                        # Adapt threshold based on recent energy levels
-                        avg_energy = sum(self.energy_history[channel]) / len(self.energy_history[channel])
-                        self.adaptive_threshold[channel] = max(self.silence_energy_threshold, 
-                                                             min(self.vad_threshold, avg_energy * 0.6))
-                    
-                    # Determine if current frame is speech using adaptive threshold
-                    is_current_speech = rms > self.adaptive_threshold[channel]
+                    is_current_speech = rms > self.vad_threshold
                     
                     # Always add to accumulated buffer for continuous streaming
                     self.accumulated_audio[channel].extend(audio_chunk)
                     
-                    # VAD state machine for utterance detection with improved timing precision
+                    # VAD state machine for utterance detection
                     if is_current_speech:
                         self.silence_frames[channel] = 0
                         self.speech_frames[channel] += 1
                         
                         if not self.is_speech[channel] and self.speech_frames[channel] >= 2:
                             self.is_speech[channel] = True
-                            self.logger.debug(f"Channel {channel}: Speech detected (RMS: {rms:.2f}, threshold: {self.adaptive_threshold[channel]:.2f})")
+                            self.logger.debug(f"Channel {channel}: Speech detected")
                             
                     else:
                         # Not speech
@@ -200,8 +181,7 @@ class StreamingTranscription:
                             # If we've detected enough silence after speech, process the utterance
                             if self.silence_frames[channel] >= self.silence_threshold_frames:
                                 self.is_speech[channel] = False
-                                self.logger.debug(f"Channel {channel}: End of speech detected after {self.silence_frames[channel] * 0.1:.2f}s of silence")
-                                # Process with high precision timestamps
+                                self.logger.debug(f"Channel {channel}: End of speech detected")
                                 self._process_accumulated_audio(channel, loop)
                     
                     # Periodically process accumulated audio even during continuous speech
@@ -473,12 +453,7 @@ class StreamingTranscription:
                                 if low_confidence_tokens:
                                     self.logger.debug(f"Low confidence tokens: {', '.join(low_confidence_tokens)}")
                                 
-                                # Log the processed transcript with timing information
-                                self.logger.info(f"OpenAI transcription processed successfully: '{filtered_transcript}', " 
-                                               f"confidence: {avg_confidence:.5f}, "
-                                               f"audio length: {len(audio_data)/16000:.5f}s")
-                                               
-                                # Create a response object similar to Google API response with precise timestamps
+                                # Create response object similar to Google API response
                                 return self.create_response_object(filtered_transcript, avg_confidence)
                             else:
                                 error_text = await response.text()
@@ -510,35 +485,20 @@ class StreamingTranscription:
         
         if text_words:
             # Create synthetic timing for words
-            # Calculate more realistic total duration based on word count
-            # We use similar logic as we did in audio_hook_server.py for consistency
             total_duration = min(max(len(text_words) * 0.3, 1.0), 10.0)
             avg_duration = total_duration / len(text_words)
             
             for i, word_text in enumerate(text_words):
-                # More precise calculation of start and end times (5 decimal places)
                 start_time = i * avg_duration
                 end_time = (i + 1) * avg_duration
-                
-                # Consider word length for more realistic duration
-                # Longer words should have proportionally longer durations
-                word_length_factor = len(word_text) / 5  # Normalize around 5 chars
-                word_duration = avg_duration * min(max(word_length_factor, 0.5), 2.0)
-                
-                # Ensure we don't exceed total duration
-                if i == len(text_words) - 1:
-                    end_time = total_duration
                 
                 word = Word(
                     word=word_text,
                     start_offset=timedelta(seconds=start_time),
-                    end_offset=timedelta(seconds=min(end_time, total_duration)),
+                    end_offset=timedelta(seconds=end_time),
                     confidence=confidence  # Use calculated confidence
                 )
                 words.append(word)
-        
-            self.logger.debug(f"Created synthetic timestamps for {len(words)} words, " 
-                             f"total duration: {total_duration:.5f}s")
         
         alternative = Alternative(
             transcript=transcript,

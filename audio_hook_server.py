@@ -60,9 +60,9 @@ class AudioHookServer:
         self.destination_language = "en-US"
 
         self.enable_translation = False
-
+        
         self.speech_provider = DEFAULT_SPEECH_PROVIDER
-
+        
         self.StreamingTranscription = None
 
         self.streaming_transcriptions = []
@@ -73,13 +73,13 @@ class AudioHookServer:
     def _load_transcription_provider(self, provider_name=None):
         provider = provider_name or self.speech_provider
         provider = provider.lower()
-
+        
         try:
             if provider == 'openai':
                 module = importlib.import_module('openai_speech_transcription')
-            else:
+            else:  # default to google
                 module = importlib.import_module('google_speech_transcription')
-
+                
             self.StreamingTranscription = module.StreamingTranscription
             self.logger.info(f"Loaded transcription provider: {provider}")
         except ImportError as e:
@@ -113,7 +113,7 @@ class AudioHookServer:
 
             if retry_after is None and hasattr(self.ws, 'response_headers'):
                 http_retry_after = (
-                    self.ws.response_headers.get('Retry-After') or
+                    self.ws.response_headers.get('Retry-After') or 
                     self.ws.response_headers.get('retry-after')
                 )
                 if http_retry_after:
@@ -170,19 +170,7 @@ class AudioHookServer:
             )
 
             return True
-
-        # Handle other non-429 errors if needed
-        error_message = msg["parameters"].get("message", "Unknown error")
-        self.logger.error(f"Received error message from Genesys: Code {error_code}, Message: {error_message}")
-
-        # Decide if we should disconnect based on the error, e.g., for persistent 400 errors
-        if error_code == 400 and "mandatory" in error_message.lower():
-             self.logger.warning(f"Received 400 Bad Request, possibly due to malformed event. Error: {error_message}")
-             # Optionally disconnect or just log
-             # await self.disconnect_session(reason="error", info=f"Received critical error: {error_message}")
-             # return False # Indicate handled but don't necessarily retry like 429
-
-        return False # Indicate error was not a handled rate limit
+        return False
 
     async def handle_message(self, msg: dict):
         msg_type = msg.get("type")
@@ -220,7 +208,7 @@ class AudioHookServer:
         if discarded_duration_str:
             try:
                 gap = parse_iso8601_duration(discarded_duration_str)
-                gap_samples = int(gap * 8000)
+                gap_samples = int(gap * 8000)  # assuming 8kHz sample rate
                 self.offset_adjustment += gap_samples
                 self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment.")
             except ValueError as e:
@@ -238,7 +226,7 @@ class AudioHookServer:
     async def handle_resumed(self, msg: dict):
         if self.pause_start_time is not None:
             pause_duration = time.time() - self.pause_start_time
-            gap_samples = int(pause_duration * 8000)
+            gap_samples = int(pause_duration * 8000)  # assuming 8kHz sample rate
             self.offset_adjustment += gap_samples
             self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment.")
             self.pause_start_time = None
@@ -255,9 +243,9 @@ class AudioHookServer:
         self.enable_translation = custom_config.get("enableTranslation", False)
 
         self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
-
-        self.speech_provider = custom_config.get("transcriptionVendor", DEFAULT_SPEECH_PROVIDER).lower()
-
+        
+        self.speech_provider = custom_config.get("transcriptionVendor", DEFAULT_SPEECH_PROVIDER)
+        
         self._load_transcription_provider(self.speech_provider)
 
         is_probe = (
@@ -392,7 +380,7 @@ class AudioHookServer:
 
     async def disconnect_session(self, reason="completed", info=""):
         try:
-            if not self.session_id or not self.running:
+            if not self.session_id:
                 return
 
             disconnect_msg = {
@@ -407,12 +395,10 @@ class AudioHookServer:
                     "outputVariables": {}
                 }
             }
-            self.running = False # Set running false before sending to avoid race conditions
             if await self._send_json(disconnect_msg):
                 self.server_seq += 1
             else:
                 self.logger.error("Failed to send disconnect message")
-
             try:
                 await asyncio.wait_for(self.ws.wait_closed(), timeout=5.0)
             except asyncio.TimeoutError:
@@ -420,13 +406,11 @@ class AudioHookServer:
         except Exception as e:
             self.logger.error(f"Error in disconnect_session: {e}")
         finally:
-            if self.running: # Double check if still running
-                 self.running = False
+            self.running = False
             for transcription in self.streaming_transcriptions:
                 transcription.stop_streaming()
             for task in self.process_responses_tasks:
-                if not task.done():
-                    task.cancel()
+                task.cancel()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
         self.audio_frames_received += 1
@@ -440,27 +424,18 @@ class AudioHookServer:
         self.total_samples += sample_times
 
         if channels == 2:
-            left_channel = frame_bytes[0::2]
-            right_channel = frame_bytes[1::2]
-            if self.running and len(self.streaming_transcriptions) > 1:
-                self.streaming_transcriptions[0].feed_audio(left_channel, 0)
-                self.streaming_transcriptions[1].feed_audio(right_channel, 1) # Pass correct channel index
+            left_channel = frame_bytes[0::2]  # External channel
+            right_channel = frame_bytes[1::2]  # Internal channel
+            self.streaming_transcriptions[0].feed_audio(left_channel, 0)
+            self.streaming_transcriptions[1].feed_audio(right_channel, 0)
         else:
-             if self.running and len(self.streaming_transcriptions) > 0:
-                self.streaming_transcriptions[0].feed_audio(frame_bytes, 0)
+            self.streaming_transcriptions[0].feed_audio(frame_bytes, 0)
 
         self.audio_buffer.append(frame_bytes)
 
     async def process_transcription_responses(self, channel):
-        is_google = self.speech_provider == 'google'
-        default_confidence = 0.99 # Use 0.99 as default for both now, OpenAI overwrites if needed
-
         while self.running:
-            if channel >= len(self.streaming_transcriptions):
-                 await asyncio.sleep(0.1) # Avoid tight loop if transcription hasn't started
-                 continue
-
-            response = self.streaming_transcriptions[channel].get_response(channel)
+            response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
             if response:
                 self.logger.info(f"Processing transcription response on channel {channel}: {response}")
                 if isinstance(response, Exception):
@@ -469,162 +444,121 @@ class AudioHookServer:
                     break
                 for result in response.results:
                     if not result.alternatives:
-                        self.logger.debug(f"Skipping result with no alternatives on channel {channel}")
                         continue
-
                     alt = result.alternatives[0]
                     transcript_text = alt.transcript
-
-                    # *** FIX: Skip processing if transcript is empty or whitespace ***
-                    if not transcript_text or transcript_text.isspace():
-                        self.logger.debug(f"Skipping empty/whitespace transcript on channel {channel}")
-                        continue
-
                     source_lang = self.input_language
-                    translated_text = transcript_text # Default to original
-                    dest_lang = source_lang # Default to original
-
                     if self.enable_translation:
                         dest_lang = self.destination_language
                         translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
                         if translated_text is None:
                             self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
-                            continue
+                            continue  # Skip sending the event if translation failed
                     else:
-                        translated_text = transcript_text # Ensure it's set even if translation disabled
-
+                        dest_lang = source_lang
+                        translated_text = transcript_text
+    
                     adjustment_seconds = self.offset_adjustment / 8000.0
-
-                    # Determine if word timings are available and reliable
+                    
+                    default_confidence = 1.0
+                    
                     use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
-                        hasattr(w, "start_offset") and w.start_offset is not None and hasattr(w, "end_offset") and w.end_offset is not None for w in alt.words
+                        hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
                     )
-
-                    # Calculate overall timing based on word timings if available
+                    
                     if use_word_timings:
                         overall_start = alt.words[0].start_offset.total_seconds()
                         overall_end = alt.words[-1].end_offset.total_seconds()
-                         # Ensure end is not before start due to potential API issues
-                        if overall_end < overall_start:
-                             overall_end = overall_start + 0.1 # Add minimal duration
                         overall_duration = overall_end - overall_start
-                        # Handle zero or negative duration
-                        if overall_duration <= 0:
-                             overall_duration = 0.1 # Assign minimal duration
                     else:
-                        self.logger.warning("No word-level timings found, using fallback calculation")
-                        # Fallback calculation (less accurate)
-                        # Estimate start based on total samples, less accurate
-                        # This calculation might need refinement if fallback is frequent
-                        current_audio_time = (self.total_samples / 8000.0) - adjustment_seconds
-                        # Estimate duration based on transcript length (very rough)
-                        estimated_duration = len(transcript_text.split()) * 0.5 # Approx 0.5s per word
-                        overall_start = max(0, current_audio_time - estimated_duration) # Don't go below zero
-                        overall_duration = max(0.1, estimated_duration) # Minimal duration 0.1s
-
-                    # Apply offset adjustment and ensure non-negative start time
+                        self.logger.warning("No word-level timings found, using fallback")
+                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
+                        overall_duration = 1.0  # Default duration
+    
                     overall_start -= adjustment_seconds
+                    
                     if overall_start < 0:
-                        self.logger.debug(f"Adjusted overall_start from {overall_start + adjustment_seconds:.2f}s to 0.0s due to negative value after adjustment.")
                         overall_start = 0
-
+                    
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
-
-                    # Determine overall confidence, falling back to default_confidence (0.99)
+    
                     overall_confidence = default_confidence
+                    
                     if hasattr(alt, "confidence") and alt.confidence is not None and alt.confidence > 0.0:
-                         # For OpenAI, alt.confidence is usually calculated avg
-                         # For Google (Chirp 2), alt.confidence might be present but is not reliable per docs
-                         # We prioritize word confidence from Google if available below
-                         # If google and not chirp 2, alt.confidence might not exist or be 0
-                        if not (is_google and not hasattr(alt.words[0] if use_word_timings and alt.words else None, 'confidence')): # If google AND has word confidences, prefer those
-                            overall_confidence = alt.confidence
-                    self.logger.debug(f"Using overall confidence: {overall_confidence:.4f}")
-
-
-                    tokens = []
+                        overall_confidence = alt.confidence
+                    
                     if self.enable_translation:
                         words_list = translated_text.split()
                         if words_list and overall_duration > 0:
                             per_word_duration = overall_duration / len(words_list)
-                            current_token_offset_s = overall_start
-                            for word in words_list:
-                                confidence = overall_confidence # Use overall confidence for translated words
+                            tokens = []
+                            for i, word in enumerate(words_list):
+                                token_offset = overall_start + i * per_word_duration
+                                confidence = overall_confidence
                                 tokens.append({
                                     "type": "word",
                                     "value": word,
                                     "confidence": confidence,
-                                    "offset": f"PT{current_token_offset_s:.2f}S",
+                                    "offset": f"PT{token_offset:.2f}S",
                                     "duration": f"PT{per_word_duration:.2f}S",
                                     "language": dest_lang
                                 })
-                                current_token_offset_s += per_word_duration
-                        elif translated_text: # Handle case where split results in empty list but text exists
-                             tokens.append({
+                        else:
+                            tokens = [{
                                 "type": "word",
                                 "value": translated_text,
                                 "confidence": overall_confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
                                 "language": dest_lang
-                            })
-                        # If translated_text is empty, tokens list remains empty, which is fine
-                    else: # No translation
+                            }]
+                    else:
                         if use_word_timings:
+                            tokens = []
                             for w in alt.words:
-                                token_offset_s = w.start_offset.total_seconds() - adjustment_seconds
-                                token_end_s = w.end_offset.total_seconds() - adjustment_seconds
-
-                                # Ensure non-negative offset and valid duration
-                                if token_offset_s < 0: token_offset_s = 0
-                                if token_end_s < token_offset_s: token_end_s = token_offset_s + 0.01 # Min duration 10ms
-                                token_duration_s = token_end_s - token_offset_s
-                                if token_duration_s <= 0 : token_duration_s = 0.01 # Min duration 10ms
-
-                                # *** FIX: Use default_confidence (0.99) as fallback for Google word confidence ***
+                                token_offset = w.start_offset.total_seconds() - adjustment_seconds
+                                token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
+                                
+                                if token_offset < 0:
+                                    token_offset = 0
+                                
                                 word_confidence = default_confidence
                                 if hasattr(w, "confidence") and w.confidence is not None and w.confidence > 0.0:
                                     word_confidence = w.confidence
-
+                                    
                                 tokens.append({
                                     "type": "word",
                                     "value": w.word,
                                     "confidence": word_confidence,
-                                    "offset": f"PT{token_offset_s:.2f}S",
-                                    "duration": f"PT{token_duration_s:.2f}S",
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{token_duration:.2f}S",
                                     "language": dest_lang
                                 })
-                        elif transcript_text: # Fallback if no word timings, but transcript exists
-                            tokens.append({
+                        else:
+                            tokens = [{
                                 "type": "word",
                                 "value": transcript_text,
-                                "confidence": overall_confidence, # Use overall confidence
+                                "confidence": overall_confidence,
                                 "offset": offset_str,
                                 "duration": duration_str,
                                 "language": dest_lang
-                            })
-                        # If transcript_text is empty and no word timings, tokens list remains empty
-
-                    # Only proceed if we have tokens
-                    if not tokens:
-                         self.logger.warning(f"No tokens generated for transcript '{transcript_text}' on channel {channel}. Skipping event.")
-                         continue
-
+                            }]
+    
                     alternative = {
                         "confidence": overall_confidence,
                         **({"languages": [dest_lang]} if self.enable_translation else {}),
                         "interpretations": [
                             {
                                 "type": "display",
-                                "transcript": translated_text, # Use translated_text here
+                                "transcript": translated_text,
                                 "tokens": tokens
                             }
                         ]
                     }
-
-                    channel_id = channel
-
+    
+                    channel_id = channel  # Integer channel index
+    
                     transcript_event = {
                         "version": "2",
                         "type": "event",
@@ -655,7 +589,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01) # Avoid busy-waiting
+                await asyncio.sleep(0.01)    
 
     async def _send_json(self, msg: dict):
         try:
@@ -665,16 +599,15 @@ class AudioHookServer:
                     f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
                     f"Message type: {msg.get('type')}. Dropping to maintain compliance."
                 )
-                return False
+                return False  # Message not sent
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
-            return True
+            return True  # Message sent
         except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False
             return False
         except Exception as e:
             self.logger.error(f"Error sending message: {e}")
-            # Consider setting self.running = False or attempting disconnect here too
             return False

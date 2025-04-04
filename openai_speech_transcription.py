@@ -112,6 +112,10 @@ class StreamingTranscription:
 
         # Minimum confidence threshold for tokens (to filter out uncertain transcriptions)
         self.token_confidence_threshold = 0.2
+        
+        # Track audio timeline per channel
+        self.audio_positions = [0 for _ in range(channels)]  # Position in samples
+        self.utterance_start_positions = [0 for _ in range(channels)]  # Start position of current utterance
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -152,6 +156,11 @@ class StreamingTranscription:
                         self.logger.debug(f"Channel {channel}: Skipping initial frame {self.initial_frames_processed[channel]} to avoid startup artifacts")
                         continue
                     
+                    # Update audio position (in samples)
+                    # PCM16 data is 2 bytes per sample
+                    samples_in_chunk = len(audio_chunk) // 2
+                    self.audio_positions[channel] += samples_in_chunk
+                    
                     # Approximate frame duration
                     frame_duration = len(audio_chunk) / 16000.0  # 8000 Hz * 2 bytes per sample
                     
@@ -170,6 +179,8 @@ class StreamingTranscription:
                         if not self.is_speech[channel] and self.speech_frames[channel] >= 2:
                             self.is_speech[channel] = True
                             self.logger.debug(f"Channel {channel}: Speech detected")
+                            # Record start position of utterance
+                            self.utterance_start_positions[channel] = self.audio_positions[channel] - samples_in_chunk
                             
                     else:
                         # Not speech
@@ -224,13 +235,25 @@ class StreamingTranscription:
                 self.last_process_time[channel] = time.time()
                 return
                 
+            # Save utterance position for timing calculation
+            utterance_start = self.utterance_start_positions[channel]
+            # Utterance duration in samples
+            utterance_samples = len(audio_data) // 2
+            # Get the current audio position at the end of this utterance
+            current_position = self.audio_positions[channel]
+            
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
                 self._write_wav_file(temp_wav, audio_data)
                 
                 try:
-                    # Use OpenAI streaming transcription
+                    # Pass timing information to the transcription function
                     result = loop.run_until_complete(
-                        self.stream_transcribe_audio(temp_wav.name, channel)
+                        self.stream_transcribe_audio(
+                            temp_wav.name, 
+                            channel,
+                            utterance_start,
+                            utterance_samples
+                        )
                     )
                     
                     if result and not isinstance(result, Exception):
@@ -262,6 +285,10 @@ class StreamingTranscription:
             # Reset accumulated audio and update last process time
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
+            
+            # After processing, update the utterance start position for next utterance
+            self.utterance_start_positions[channel] = current_position
+            
         except Exception as e:
             self.logger.error(f"Error processing accumulated audio: {e}")
             self.accumulated_audio[channel] = bytearray()
@@ -316,7 +343,7 @@ class StreamingTranscription:
         temp_wav.write(audio_data)
         temp_wav.flush()
 
-    async def stream_transcribe_audio(self, file_path, channel):
+    async def stream_transcribe_audio(self, file_path, channel, utterance_start_samples, utterance_samples):
         """Stream transcribe audio using OpenAI's streaming API"""
         try:
             openai_lang = self.openai_language
@@ -453,8 +480,13 @@ class StreamingTranscription:
                                 if low_confidence_tokens:
                                     self.logger.debug(f"Low confidence tokens: {', '.join(low_confidence_tokens)}")
                                 
-                                # Create response object similar to Google API response
-                                return self.create_response_object(filtered_transcript, avg_confidence)
+                                # Create response object with proper timing information
+                                return self.create_response_object(
+                                    filtered_transcript, 
+                                    avg_confidence, 
+                                    utterance_start_samples, 
+                                    utterance_samples
+                                )
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")
@@ -472,8 +504,16 @@ class StreamingTranscription:
             self.logger.error(f"Error in stream_transcribe_audio: {str(e)}")
             return None
 
-    def create_response_object(self, transcript, confidence):
-        """Create a response object compatible with Google API format"""
+    def create_response_object(self, transcript, confidence, utterance_start_samples, utterance_samples):
+        """
+        Create a response object compatible with Google API format, using actual audio timeline.
+        
+        Args:
+            transcript: The transcribed text
+            confidence: Confidence score (0-1)
+            utterance_start_samples: Start position of utterance in samples
+            utterance_samples: Number of samples in utterance
+        """
         if not transcript:
             return None
             
@@ -483,26 +523,35 @@ class StreamingTranscription:
         text_words = transcript.split()
         words = []
         
+        # Convert sample positions to timestamps
+        # Using 8000Hz sample rate
+        utterance_start_sec = utterance_start_samples / 8000.0
+        utterance_duration_sec = utterance_samples / 8000.0
+        
+        self.logger.debug(f"Creating response object with utterance_start={utterance_start_sec:.3f}s, duration={utterance_duration_sec:.3f}s")
+        
         if text_words:
-            # Create synthetic timing for words
-            total_duration = min(max(len(text_words) * 0.3, 1.0), 10.0)
-            avg_duration = total_duration / len(text_words)
+            # Calculate timing based on word count and actual audio duration
+            # This makes sure the synthetic timing aligns with actual audio timeline
+            words_count = len(text_words)
+            avg_duration = utterance_duration_sec / words_count if words_count > 0 else 0.1
             
             for i, word_text in enumerate(text_words):
-                start_time = i * avg_duration
-                end_time = (i + 1) * avg_duration
+                # Calculate word start and end time based on position in utterance
+                word_start_time = utterance_start_sec + (i * avg_duration)
+                word_end_time = utterance_start_sec + ((i + 1) * avg_duration)
                 
                 word = Word(
                     word=word_text,
-                    start_offset=timedelta(seconds=start_time),
-                    end_offset=timedelta(seconds=end_time),
-                    confidence=confidence  # Use calculated confidence
+                    start_offset=timedelta(seconds=word_start_time),
+                    end_offset=timedelta(seconds=word_end_time),
+                    confidence=confidence
                 )
                 words.append(word)
         
         alternative = Alternative(
             transcript=transcript,
-            confidence=confidence,  # Use calculated confidence
+            confidence=confidence,
             words=words
         )
         

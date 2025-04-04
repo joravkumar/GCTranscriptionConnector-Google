@@ -467,31 +467,18 @@ class AudioHookServer:
                         hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
                     )
                     
-                    # Detect if we're working with OpenAI synthetic timestamps
-                    has_synthetic_timings = SPEECH_PROVIDER == 'openai' and hasattr(alt, "words") and alt.words and len(alt.words) > 0
-                    
                     if use_word_timings:
                         # We have word-level timings 
                         overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
                         overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
                         overall_duration = overall_end - overall_start
-                    elif has_synthetic_timings:
-                        # Handle OpenAI synthetic timestamps
-                        # For OpenAI, we need the global timeline position
-                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        
-                        # Calculate an appropriate duration based on word count
-                        word_count = len(alt.words)
-                        # Use similar timing logic as in openai_speech_transcription.py
-                        overall_duration = min(max(word_count * 0.3, 1.0), 10.0)
                     else:
-                        # No word-level timings or synthetic timings
+                        # No word-level timings
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        overall_duration = 1.0  # Use a default duration instead of 0.0
+                        overall_duration = 0.0
     
-                    # Use 5 decimal places to match Genesys AudioHook expected format
-                    offset_str = f"PT{overall_start:.5f}S"
-                    duration_str = f"PT{overall_duration:.5f}S"
+                    offset_str = f"PT{overall_start:.2f}S"
+                    duration_str = f"PT{overall_duration:.2f}S"
     
                     # Use appropriate confidence values based on the speech provider
                     from config import SPEECH_PROVIDER, GOOGLE_SPEECH_MODEL
@@ -524,8 +511,8 @@ class AudioHookServer:
                                     "type": "word",
                                     "value": word,
                                     "confidence": confidence,
-                                    "offset": f"PT{token_offset:.5f}S",
-                                    "duration": f"PT{per_word_duration:.5f}S",
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{per_word_duration:.2f}S",
                                     "language": dest_lang
                                 })
                         else:
@@ -554,32 +541,8 @@ class AudioHookServer:
                                     "type": "word",
                                     "value": w.word,
                                     "confidence": word_confidence,
-                                    "offset": f"PT{token_offset:.5f}S",
-                                    "duration": f"PT{token_duration:.5f}S",
-                                    "language": dest_lang
-                                })
-                        elif has_synthetic_timings:
-                            # For OpenAI with synthetic timestamps, align with global timeline
-                            tokens = []
-                            word_count = len(alt.words)
-                            # Use the previously calculated overall_duration
-                            per_word_duration = overall_duration / word_count
-                            
-                            for i, w in enumerate(alt.words):
-                                # Align each word with the global timeline
-                                token_offset = overall_start + (i * per_word_duration)
-                                
-                                # Get word confidence if available
-                                word_confidence = default_confidence
-                                if hasattr(w, "confidence") and w.confidence is not None:
-                                    word_confidence = w.confidence
-                                
-                                tokens.append({
-                                    "type": "word",
-                                    "value": w.word,
-                                    "confidence": word_confidence,
-                                    "offset": f"PT{token_offset:.5f}S",
-                                    "duration": f"PT{per_word_duration:.5f}S",
+                                    "offset": f"PT{token_offset:.2f}S",
+                                    "duration": f"PT{token_duration:.2f}S",
                                     "language": dest_lang
                                 })
                         else:

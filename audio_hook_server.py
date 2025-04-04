@@ -462,7 +462,7 @@ class AudioHookServer:
     
                     adjustment_seconds = self.offset_adjustment / 8000.0
                     
-                    default_confidence = 1.0 if self.speech_provider == 'openai' else 0.99
+                    default_confidence = 0.99
                     
                     use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
                         hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words

@@ -6,6 +6,7 @@ import websockets
 import tempfile
 import audioop
 import logging
+import importlib
 from websockets.exceptions import ConnectionClosed
 
 from config import (
@@ -16,20 +17,13 @@ from config import (
     GENESYS_BINARY_BURST_LIMIT,
     MAX_AUDIO_BUFFER_SIZE,
     SUPPORTED_LANGUAGES,
-    SPEECH_PROVIDER
+    DEFAULT_SPEECH_PROVIDER
 )
 from rate_limiter import RateLimiter
 from utils import format_json, parse_iso8601_duration
 
 # Import language normalization function
 from language_mapping import normalize_language_code
-
-# Import the appropriate speech transcription module based on the configured provider
-if SPEECH_PROVIDER == 'openai':
-    from openai_speech_transcription import StreamingTranscription
-else:
-    from google_speech_transcription import StreamingTranscription
-
 from google_gemini_translation import translate_with_gemini
 
 from collections import deque
@@ -74,12 +68,40 @@ class AudioHookServer:
 
         # Translation enable flag from customConfig.enableTranslation
         self.enable_translation = False
+        
+        # Speech provider selection, will be set from customConfig.transcriptionVendor
+        self.speech_provider = DEFAULT_SPEECH_PROVIDER
+        
+        # The StreamingTranscription class, which will be dynamically loaded
+        self.StreamingTranscription = None
 
         # Streaming transcription for each channel
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
 
         self.logger.info(f"New session started: {self.session_id}")
+
+    def _load_transcription_provider(self, provider_name=None):
+        """Dynamically load the appropriate transcription provider module."""
+        provider = provider_name or self.speech_provider
+        provider = provider.lower()
+        
+        try:
+            if provider == 'openai':
+                module = importlib.import_module('openai_speech_transcription')
+            else:  # default to google
+                module = importlib.import_module('google_speech_transcription')
+                
+            self.StreamingTranscription = module.StreamingTranscription
+            self.logger.info(f"Loaded transcription provider: {provider}")
+        except ImportError as e:
+            self.logger.error(f"Failed to load transcription provider '{provider}': {e}")
+            # Fall back to Google if the requested provider fails to load
+            if provider != 'google':
+                self.logger.warning(f"Falling back to Google transcription provider")
+                self._load_transcription_provider('google')
+            else:
+                raise  # If Google also fails, let the error propagate
 
     async def handle_error(self, msg: dict):
         error_code = msg["parameters"].get("code")
@@ -238,6 +260,12 @@ class AudioHookServer:
 
         # Set destination_language from the "language" field
         self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
+        
+        # Set speech_provider from customConfig.transcriptionVendor, default to DEFAULT_SPEECH_PROVIDER
+        self.speech_provider = custom_config.get("transcriptionVendor", DEFAULT_SPEECH_PROVIDER)
+        
+        # Load the appropriate transcription provider module
+        self._load_transcription_provider(self.speech_provider)
 
         is_probe = (
             msg["parameters"].get("conversationId") == "00000000-0000-0000-0000-000000000000" and
@@ -320,7 +348,7 @@ class AudioHookServer:
             channels = 1
 
         # Initialize streaming transcription for each channel as mono using the input language
-        self.streaming_transcriptions = [StreamingTranscription(self.input_language, 1, self.logger) for _ in range(channels)]
+        self.streaming_transcriptions = [self.StreamingTranscription(self.input_language, 1, self.logger) for _ in range(channels)]
         for transcription in self.streaming_transcriptions:
             transcription.start_streaming()
         self.process_responses_tasks = [asyncio.create_task(self.process_transcription_responses(channel)) for channel in range(channels)]
@@ -469,32 +497,32 @@ class AudioHookServer:
                     
                     if use_word_timings:
                         # We have word-level timings 
-                        overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
-                        overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
+                        overall_start = alt.words[0].start_offset.total_seconds()
+                        overall_end = alt.words[-1].end_offset.total_seconds()
                         overall_duration = overall_end - overall_start
                     else:
-                        # No word-level timings
+                        # No word-level timings - should never happen as we always create synthetic timings
+                        self.logger.warning("No word-level timings found, using fallback")
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        overall_duration = 0.0
+                        overall_duration = 1.0  # Default duration
     
+                    # Apply the offset adjustment to the overall start time
+                    # For both Google and OpenAI, we want to subtract the adjustment
+                    overall_start -= adjustment_seconds
+                    
+                    # Ensure we don't have negative start times
+                    if overall_start < 0:
+                        overall_start = 0
+                    
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
     
-                    # Use appropriate confidence values based on the speech provider
-                    from config import SPEECH_PROVIDER, GOOGLE_SPEECH_MODEL
-                    
                     # Default confidence value
                     overall_confidence = default_confidence
                     
-                    # If using Google with Chirp 2, use the actual confidence
-                    if SPEECH_PROVIDER == 'google' and GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
-                        use_actual_confidence = True
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
-                    # If using OpenAI, we already set a reasonable confidence value
-                    elif SPEECH_PROVIDER == 'openai':
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
+                    # If the model has confidence information, use it
+                    if hasattr(alt, "confidence") and alt.confidence is not None:
+                        overall_confidence = alt.confidence
                     
                     # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
@@ -529,8 +557,13 @@ class AudioHookServer:
                         if use_word_timings:
                             tokens = []
                             for w in alt.words:
+                                # Get absolute token offset time, then subtract the adjustment
                                 token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
+                                
+                                # Ensure we don't have negative token offsets 
+                                if token_offset < 0:
+                                    token_offset = 0
                                 
                                 # Get word confidence
                                 word_confidence = default_confidence
@@ -600,7 +633,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)    
 
     async def _send_json(self, msg: dict):
         try:

@@ -353,7 +353,7 @@ The connector automatically adapts to whichever provider and model is specified 
 
 ## Dynamic Transcription Vendor Selection
 
-The server now supports dynamic selection of the transcription vendor on a per-conversation basis:
+The server supports dynamic selection of the transcription vendor on a per-conversation basis:
 
 - **Configuration in Genesys Open Message:**
   - The transcription vendor can be specified in the "open" message via the `customConfig.transcriptionVendor` field:
@@ -418,7 +418,7 @@ Since OpenAI's Speech-to-Text API doesn't provide word-level timing information,
 
 ### Confidence Scores for OpenAI
 
-The connector now provides more accurate word-level confidence scores for OpenAI transcriptions:
+The connector provides more accurate word-level confidence scores for OpenAI transcriptions:
 
 - **Token-Level Logprobs:**
   - OpenAI's streaming API provides logprobs (log probabilities) for each token.

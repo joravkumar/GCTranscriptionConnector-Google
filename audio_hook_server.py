@@ -3,7 +3,6 @@ import uuid
 import json
 import time
 import websockets
-import tempfile
 import audioop
 import logging
 import importlib
@@ -55,6 +54,7 @@ class AudioHookServer:
         self.total_samples = 0
         self.offset_adjustment = 0
         self.pause_start_time = None
+        self.paused_durations = []
 
         self.input_language = "en-US"
         self.destination_language = "en-US"
@@ -67,6 +67,11 @@ class AudioHookServer:
 
         self.streaming_transcriptions = []
         self.process_responses_tasks = []
+        
+        self.offset_lock = asyncio.Lock()
+        self.is_reconnect = False
+        self.is_client_paused = False
+        self.is_server_paused = False
 
         self.logger.info(f"New session started: {self.session_id}")
 
@@ -77,7 +82,7 @@ class AudioHookServer:
         try:
             if provider == 'openai':
                 module = importlib.import_module('openai_speech_transcription')
-            else:  # default to google
+            else:
                 module = importlib.import_module('google_speech_transcription')
                 
             self.StreamingTranscription = module.StreamingTranscription
@@ -199,51 +204,75 @@ class AudioHookServer:
         elif msg_type == "resumed":
             await self.handle_resumed(msg)
         elif msg_type in ["update"]:
-            self.logger.debug(f"Ignoring message type {msg_type}")
+            await self.handle_update(msg)
         else:
-            self.logger.debug(f"Ignoring unknown message type: {msg_type}")
+            self.logger.debug(f"Ignoring message type {msg_type}")
 
     async def handle_discarded(self, msg: dict):
         discarded_duration_str = msg["parameters"].get("discarded")
         if discarded_duration_str:
             try:
-                gap = parse_iso8601_duration(discarded_duration_str)
-                gap_samples = int(gap * 8000)  # assuming 8kHz sample rate
-                self.offset_adjustment += gap_samples
-                self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment.")
+                async with self.offset_lock:
+                    gap = parse_iso8601_duration(discarded_duration_str)
+                    gap_samples = int(gap * 8000)
+                    self.offset_adjustment += gap_samples
+                    self.logger.info(f"Handled 'discarded' message: gap duration {gap}s, adding {gap_samples} samples to offset adjustment (new total: {self.offset_adjustment}).")
             except ValueError as e:
                 self.logger.warning(f"Failed to parse discarded duration '{discarded_duration_str}': {e}")
         else:
             self.logger.warning("Received 'discarded' message without 'discarded' parameter.")
 
     async def handle_paused(self, msg: dict):
-        if self.pause_start_time is None:
+        if self.is_client_paused:
+            self.logger.warning("Received 'paused' message while already paused by client.")
+            return
+            
+        if not self.pause_start_time:
             self.pause_start_time = time.time()
-            self.logger.info("Handled 'paused' message: pause started.")
+            self.is_client_paused = True
+            self.logger.info("Handled 'paused' message: client pause started.")
         else:
             self.logger.warning("Received 'paused' message while already paused.")
 
     async def handle_resumed(self, msg: dict):
+        self.is_client_paused = False
+        
         if self.pause_start_time is not None:
             pause_duration = time.time() - self.pause_start_time
-            gap_samples = int(pause_duration * 8000)  # assuming 8kHz sample rate
-            self.offset_adjustment += gap_samples
-            self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment.")
+            async with self.offset_lock:
+                gap_samples = int(pause_duration * 8000)
+                self.offset_adjustment += gap_samples
+                self.paused_durations.append((self.pause_start_time, time.time(), gap_samples))
+                self.logger.info(f"Handled 'resumed' message: pause duration {pause_duration:.2f}s, adding {gap_samples} samples to offset adjustment (new total: {self.offset_adjustment}).")
             self.pause_start_time = None
         else:
             self.logger.warning("Received 'resumed' message without a preceding 'paused' event.")
 
+    async def handle_update(self, msg: dict):
+        updated_language = msg["parameters"].get("language")
+        if updated_language:
+            self.destination_language = normalize_language_code(updated_language)
+            self.logger.info(f"Updated language to: {self.destination_language}")
+            # Send acknowledgement (optional but good practice)
+            updated_msg = {
+                "version": "2",
+                "type": "updated",
+                "seq": self.server_seq + 1,
+                "clientseq": self.client_seq,
+                "id": self.session_id,
+                "parameters": {}
+            }
+            if await self._send_json(updated_msg):
+                self.server_seq += 1
+
     async def handle_open(self, msg: dict):
         self.session_id = msg["id"]
+        self.is_reconnect = "position" in msg and msg["position"] != "PT0S"
 
         custom_config = msg["parameters"].get("customConfig", {})
-
         self.input_language = normalize_language_code(custom_config.get("inputLanguage", "en-US"))
-
         self.enable_translation = custom_config.get("enableTranslation", False)
-
         self.destination_language = normalize_language_code(msg["parameters"].get("language", "en-US"))
-        
         self.speech_provider = custom_config.get("transcriptionVendor", DEFAULT_SPEECH_PROVIDER)
         
         self._load_transcription_provider(self.speech_provider)
@@ -369,7 +398,8 @@ class AudioHookServer:
         self.logger.info(
             f"Session stats - Duration: {duration:.2f}s, "
             f"Frames sent: {self.audio_frames_sent}, "
-            f"Frames received: {self.audio_frames_received}"
+            f"Frames received: {self.audio_frames_received}, "
+            f"Total offset adjustment: {self.offset_adjustment} samples"
         )
 
         self.running = False
@@ -424,8 +454,8 @@ class AudioHookServer:
         self.total_samples += sample_times
 
         if channels == 2:
-            left_channel = frame_bytes[0::2]  # External channel
-            right_channel = frame_bytes[1::2]  # Internal channel
+            left_channel = frame_bytes[0::2]
+            right_channel = frame_bytes[1::2]
             self.streaming_transcriptions[0].feed_audio(left_channel, 0)
             self.streaming_transcriptions[1].feed_audio(right_channel, 0)
         else:
@@ -435,161 +465,169 @@ class AudioHookServer:
 
     async def process_transcription_responses(self, channel):
         while self.running:
-            response = self.streaming_transcriptions[channel].get_response(0)  # Each instance handles 1 channel
-            if response:
-                self.logger.info(f"Processing transcription response on channel {channel}: {response}")
-                if isinstance(response, Exception):
-                    self.logger.error(f"Streaming recognition error on channel {channel}: {response}")
-                    await self.disconnect_session(reason="error", info="Streaming recognition failed")
-                    break
-                for result in response.results:
-                    if not result.alternatives:
-                        continue
-                    alt = result.alternatives[0]
-                    transcript_text = alt.transcript
-                    source_lang = self.input_language
-                    if self.enable_translation:
-                        dest_lang = self.destination_language
-                        translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
-                        if translated_text is None:
-                            self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
-                            continue  # Skip sending the event if translation failed
-                    else:
-                        dest_lang = source_lang
-                        translated_text = transcript_text
-    
-                    adjustment_seconds = self.offset_adjustment / 8000.0
+            try:
+                response = self.streaming_transcriptions[channel].get_response(0)
+                if response:
+                    self.logger.info(f"Processing transcription response on channel {channel}: {response}")
+                    if isinstance(response, Exception):
+                        self.logger.error(f"Streaming recognition error on channel {channel}: {response}")
+                        await self.disconnect_session(reason="error", info="Streaming recognition failed")
+                        break
                     
-                    default_confidence = 1.0
-                    
-                    use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
-                        hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
-                    )
-                    
-                    if use_word_timings:
-                        overall_start = alt.words[0].start_offset.total_seconds()
-                        overall_end = alt.words[-1].end_offset.total_seconds()
-                        overall_duration = overall_end - overall_start
-                    else:
-                        self.logger.warning("No word-level timings found, using fallback")
-                        overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        overall_duration = 1.0  # Default duration
-    
-                    overall_start -= adjustment_seconds
-                    
-                    if overall_start < 0:
-                        overall_start = 0
-                    
-                    offset_str = f"PT{overall_start:.2f}S"
-                    duration_str = f"PT{overall_duration:.2f}S"
-    
-                    overall_confidence = default_confidence
-                    
-                    if hasattr(alt, "confidence") and alt.confidence is not None and alt.confidence > 0.0:
-                        overall_confidence = alt.confidence
-                    
-                    if self.enable_translation:
-                        words_list = translated_text.split()
-                        if words_list and overall_duration > 0:
-                            per_word_duration = overall_duration / len(words_list)
-                            tokens = []
-                            for i, word in enumerate(words_list):
-                                token_offset = overall_start + i * per_word_duration
-                                confidence = overall_confidence
-                                tokens.append({
-                                    "type": "word",
-                                    "value": word,
-                                    "confidence": confidence,
-                                    "offset": f"PT{token_offset:.2f}S",
-                                    "duration": f"PT{per_word_duration:.2f}S",
-                                    "language": dest_lang
-                                })
+                    for result in response.results:
+                        if not result.alternatives:
+                            continue
+                        
+                        alt = result.alternatives[0]
+                        transcript_text = alt.transcript
+                        source_lang = self.input_language
+                        
+                        if self.enable_translation:
+                            dest_lang = self.destination_language
+                            translated_text = await translate_with_gemini(transcript_text, source_lang, dest_lang, self.logger)
+                            if translated_text is None:
+                                self.logger.warning(f"Translation failed for text: '{transcript_text}'. Skipping transcription event.")
+                                continue
                         else:
-                            tokens = [{
-                                "type": "word",
-                                "value": translated_text,
-                                "confidence": overall_confidence,
-                                "offset": offset_str,
-                                "duration": duration_str,
-                                "language": dest_lang
-                            }]
-                    else:
+                            dest_lang = source_lang
+                            translated_text = transcript_text
+                        
+                        async with self.offset_lock:
+                            adjustment_seconds = self.offset_adjustment / 8000.0
+                        
+                        default_confidence = 1.0
+                        
+                        use_word_timings = hasattr(alt, "words") and alt.words and len(alt.words) > 0 and all(
+                            hasattr(w, "start_offset") and w.start_offset is not None for w in alt.words
+                        )
+                        
                         if use_word_timings:
-                            tokens = []
-                            for w in alt.words:
-                                token_offset = w.start_offset.total_seconds() - adjustment_seconds
-                                token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
-                                
-                                if token_offset < 0:
-                                    token_offset = 0
-                                
-                                word_confidence = default_confidence
-                                if hasattr(w, "confidence") and w.confidence is not None and w.confidence > 0.0:
-                                    word_confidence = w.confidence
-                                    
-                                tokens.append({
-                                    "type": "word",
-                                    "value": w.word,
-                                    "confidence": word_confidence,
-                                    "offset": f"PT{token_offset:.2f}S",
-                                    "duration": f"PT{token_duration:.2f}S",
-                                    "language": dest_lang
-                                })
+                            overall_start = alt.words[0].start_offset.total_seconds()
+                            overall_end = alt.words[-1].end_offset.total_seconds()
+                            overall_duration = overall_end - overall_start
                         else:
-                            tokens = [{
-                                "type": "word",
-                                "value": transcript_text,
-                                "confidence": overall_confidence,
-                                "offset": offset_str,
-                                "duration": duration_str,
-                                "language": dest_lang
-                            }]
-    
-                    alternative = {
-                        "confidence": overall_confidence,
-                        **({"languages": [dest_lang]} if self.enable_translation else {}),
-                        "interpretations": [
-                            {
-                                "type": "display",
-                                "transcript": translated_text,
-                                "tokens": tokens
-                            }
-                        ]
-                    }
-    
-                    channel_id = channel  # Integer channel index
-    
-                    transcript_event = {
-                        "version": "2",
-                        "type": "event",
-                        "seq": self.server_seq + 1,
-                        "clientseq": self.client_seq,
-                        "id": self.session_id,
-                        "parameters": {
-                            "entities": [
+                            self.logger.warning("No word-level timings found, using fallback")
+                            overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
+                            overall_duration = 1.0
+                        
+                        overall_start -= adjustment_seconds
+                        if overall_start < 0:
+                            overall_start = 0
+                        
+                        offset_str = f"PT{overall_start:.2f}S"
+                        duration_str = f"PT{overall_duration:.2f}S"
+                        
+                        overall_confidence = default_confidence
+                        if hasattr(alt, "confidence") and alt.confidence is not None and alt.confidence > 0.0:
+                            overall_confidence = alt.confidence
+                        
+                        if self.enable_translation:
+                            words_list = translated_text.split()
+                            if words_list and overall_duration > 0:
+                                per_word_duration = overall_duration / len(words_list)
+                                tokens = []
+                                for i, word in enumerate(words_list):
+                                    token_offset = overall_start + i * per_word_duration
+                                    confidence = overall_confidence
+                                    tokens.append({
+                                        "type": "word",
+                                        "value": word,
+                                        "confidence": confidence,
+                                        "offset": f"PT{token_offset:.2f}S",
+                                        "duration": f"PT{per_word_duration:.2f}S",
+                                        "language": dest_lang
+                                    })
+                            else:
+                                tokens = [{
+                                    "type": "word",
+                                    "value": translated_text,
+                                    "confidence": overall_confidence,
+                                    "offset": offset_str,
+                                    "duration": duration_str,
+                                    "language": dest_lang
+                                }]
+                        else:
+                            if use_word_timings:
+                                tokens = []
+                                for w in alt.words:
+                                    token_offset = w.start_offset.total_seconds() - adjustment_seconds
+                                    token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
+                                    
+                                    if token_offset < 0:
+                                        token_offset = 0
+                                    
+                                    word_confidence = default_confidence
+                                    if hasattr(w, "confidence") and w.confidence is not None and w.confidence > 0.0:
+                                        word_confidence = w.confidence
+                                        
+                                    tokens.append({
+                                        "type": "word",
+                                        "value": w.word,
+                                        "confidence": word_confidence,
+                                        "offset": f"PT{token_offset:.2f}S",
+                                        "duration": f"PT{token_duration:.2f}S",
+                                        "language": dest_lang
+                                    })
+                            else:
+                                tokens = [{
+                                    "type": "word",
+                                    "value": transcript_text,
+                                    "confidence": overall_confidence,
+                                    "offset": offset_str,
+                                    "duration": duration_str,
+                                    "language": dest_lang
+                                }]
+                        
+                        alternative = {
+                            "confidence": overall_confidence,
+                            **({"languages": [dest_lang]} if self.enable_translation else {}),
+                            "interpretations": [
                                 {
-                                    "type": "transcript",
-                                    "data": {
-                                        "id": str(uuid.uuid4()),
-                                        "channelId": channel_id,
-                                        "isFinal": result.is_final,
-                                        "offset": offset_str,
-                                        "duration": duration_str,
-                                        "alternatives": [
-                                            alternative
-                                        ]
-                                    }
+                                    "type": "display",
+                                    "transcript": translated_text,
+                                    "tokens": tokens
                                 }
                             ]
                         }
-                    }
-                    self.logger.info(f"Sending transcription event to Genesys: {json.dumps(transcript_event)}")
-                    if await self._send_json(transcript_event):
-                        self.server_seq += 1
-                    else:
-                        self.logger.debug("Transcript event dropped due to rate limiting")
-            else:
-                await asyncio.sleep(0.01)    
+                        
+                        channel_id = channel
+                        
+                        transcript_event = {
+                            "version": "2",
+                            "type": "event",
+                            "seq": self.server_seq + 1,
+                            "clientseq": self.client_seq,
+                            "id": self.session_id,
+                            "parameters": {
+                                "entities": [
+                                    {
+                                        "type": "transcript",
+                                        "data": {
+                                            "id": str(uuid.uuid4()),
+                                            "channelId": channel_id,
+                                            "isFinal": result.is_final,
+                                            "offset": offset_str,
+                                            "duration": duration_str,
+                                            "alternatives": [
+                                                alternative
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                        self.logger.info(f"Sending transcription event to Genesys: {json.dumps(transcript_event)}")
+                        if await self._send_json(transcript_event):
+                            self.server_seq += 1
+                        else:
+                            self.logger.debug("Transcript event dropped due to rate limiting")
+                else:
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in process_transcription_responses: {e}")
+                await asyncio.sleep(0.1)
 
     async def _send_json(self, msg: dict):
         try:
@@ -599,11 +637,11 @@ class AudioHookServer:
                     f"Message rate limit exceeded (current rate: {current_rate:.2f}/s). "
                     f"Message type: {msg.get('type')}. Dropping to maintain compliance."
                 )
-                return False  # Message not sent
+                return False
 
             self.logger.debug(f"Sending message to Genesys:\n{format_json(msg)}")
             await self.ws.send(json.dumps(msg))
-            return True  # Message sent
+            return True
         except ConnectionClosed:
             self.logger.warning("Genesys WebSocket closed while sending JSON message.")
             self.running = False

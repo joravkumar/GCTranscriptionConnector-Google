@@ -12,7 +12,7 @@ import logging
 from collections import deque
 import math
 import re
-import wave
+import wave # Added for writing WAV files correctly
 
 from config import (
     OPENAI_API_KEY,
@@ -88,8 +88,8 @@ class StreamingTranscription:
         self.initial_frames_processed = [0 for _ in range(channels)]
         self.skip_initial_frames = 5
 
-        # Minimum confidence threshold for tokens
-        self.token_confidence_threshold = 0.2
+        # Minimum confidence threshold for tokens - NOT USED currently as we don't get logprobs
+        # self.token_confidence_threshold = 0.2
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -205,7 +205,7 @@ class StreamingTranscription:
             self.response_queues[channel].put(e) # Signal error downstream
 
     def _process_accumulated_audio(self, channel, audio_data, loop):
-        """Process accumulated audio using OpenAI streaming transcription"""
+        """Process accumulated audio using OpenAI transcription API"""
         audio_len_bytes = len(audio_data)
         if audio_len_bytes < 1600: # Less than ~0.1s, likely noise or silence
             self.logger.debug(f"Channel {channel}: Accumulated audio too short ({audio_len_bytes} bytes), skipping processing.")
@@ -225,22 +225,22 @@ class StreamingTranscription:
                 temp_wav_path = temp_wav.name
                 try:
                      self._write_wav_file(temp_wav_path, audio_data) # Pass path, not file object
-                     # Use OpenAI streaming transcription
+                     # Use OpenAI transcription API
                      result_tuple = loop.run_until_complete(
                          self.stream_transcribe_audio(temp_wav_path, channel)
                      )
 
                      if result_tuple and not isinstance(result_tuple, Exception):
-                        transcript_text, avg_confidence = result_tuple
+                        transcript_text, fixed_confidence = result_tuple # Confidence is now fixed
 
                         # Apply filtering AFTER getting result
                         filtered_transcript = self._filter_spurious_artifacts(transcript_text)
 
                         # Only send if non-empty and different from last transcript
                         if filtered_transcript and filtered_transcript != self.last_transcripts[channel]:
-                            self.logger.info(f"Channel {channel}: OpenAI transcription result: '{filtered_transcript}' (Conf: {avg_confidence:.3f})")
-                            # Put the filtered result and confidence into the queue
-                            self.response_queues[channel].put((filtered_transcript, avg_confidence))
+                            self.logger.info(f"Channel {channel}: OpenAI transcription result: '{filtered_transcript}' (Conf: {fixed_confidence:.3f})")
+                            # Put the filtered result and fixed confidence into the queue
+                            self.response_queues[channel].put((filtered_transcript, fixed_confidence))
                             self.last_transcripts[channel] = filtered_transcript
                         elif filtered_transcript and filtered_transcript == self.last_transcripts[channel]:
                              self.logger.debug(f"Channel {channel}: Duplicate transcript detected, skipping: '{filtered_transcript}'")
@@ -322,7 +322,7 @@ class StreamingTranscription:
 
 
     async def stream_transcribe_audio(self, file_path, channel):
-        """Stream transcribe audio using OpenAI's API, returns (transcript, avg_confidence) or None"""
+        """Transcribe audio using OpenAI's API, returns (transcript, fixed_confidence) or None"""
         try:
             openai_lang = self.openai_language
             prompt_to_use = "This is a customer service call. Ignore initial beeps, rings, and system sounds." # Default prompt
@@ -345,58 +345,36 @@ class StreamingTranscription:
                                     filename=os.path.basename(file_path),
                                     content_type='audio/wav')
                 form_data.add_field('model', OPENAI_SPEECH_MODEL)
-                form_data.add_field('response_format', 'verbose_json') # Use verbose_json to get segments/tokens if available
-                form_data.add_field('timestamp_granularities[]', 'word') # Request word timestamps
+                # --- CHANGE: Use 'json' format ---
+                form_data.add_field('response_format', 'json')
+                # --- REMOVE: Timestamp granularity not supported ---
+                # form_data.add_field('timestamp_granularities[]', 'word')
                 form_data.add_field('temperature', '0')
                 form_data.add_field('prompt', prompt_to_use)
 
                 if openai_lang:
                     form_data.add_field('language', openai_lang)
 
-
-                full_transcript = ""
-                confidence_sum = 0
-                confidence_count = 0
-                words_data = []
-
-                # Note: OpenAI Transcription API doesn't truly stream results per word like Google.
-                # 'verbose_json' with 'word' granularity gives the full result with timings at the end.
-                # We are essentially using it as a non-streaming call here within the async structure.
+                # --- This call is now essentially non-streaming for gpt-4o-* ---
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, headers=headers, data=form_data, timeout=30) as response:
                             if response.status == 200:
                                 response_json = await response.json()
                                 full_transcript = response_json.get('text', '')
+                                # --- CHANGE: Use fixed confidence as logprobs/word details aren't available ---
+                                fixed_confidence = 0.95 # Assign a fixed high confidence
 
-                                # Try to get word-level confidence if available (might not be present)
-                                words_data = response_json.get('words', [])
-                                if words_data:
-                                     for word_info in words_data:
-                                          # OpenAI doesn't directly provide confidence per word via API.
-                                          # We'll rely on the server's heuristic for now.
-                                          confidence_count += 1
-                                     # Use a fixed high confidence if word timestamps exist but no confidence score.
-                                     avg_confidence = 0.95 if words_data else 0.90
-                                     self.logger.debug(f"Channel {channel}: Received {len(words_data)} words with timestamps from OpenAI.")
-
-                                else:
-                                     # Fallback: estimate confidence based on overall structure if no words array
-                                     avg_confidence = 0.90 # Default estimate
-                                     self.logger.debug(f"Channel {channel}: No word timestamps received from OpenAI. Using default confidence.")
-
-
-                                # Basic check for low confidence based on the *presence* of words (heuristic)
-                                if not full_transcript and not words_data:
-                                     avg_confidence = 0.5 # Lower confidence if completely empty
-
-                                return (full_transcript, avg_confidence)
+                                return (full_transcript, fixed_confidence)
 
                             else:
+                                # Log error details as before
                                 error_text = await response.text()
                                 self.logger.error(f"Channel {channel}: OpenAI API error: {response.status} - {error_text}")
                                 if "language" in error_text.lower() and self.is_unsupported_language:
-                                    self.logger.error(f"Language-related error details: Input Lang='{self.language}', OpenAI Lang='{openai_lang}', Is Unsupported={self.is_unsupported_language}, Prompt='{prompt_to_use}'")
+                                     self.logger.error(f"Language-related error details: Input Lang='{self.language}', OpenAI Lang='{openai_lang}', Is Unsupported={self.is_unsupported_language}, Prompt='{prompt_to_use}'")
+                                elif "response_format" in error_text.lower():
+                                     self.logger.error(f"Response format error details: Model='{OPENAI_SPEECH_MODEL}', Requested Format='json'") # Log current format
                                 return None # Indicate failure
                 except asyncio.TimeoutError:
                     self.logger.warning(f"Channel {channel}: OpenAI API request timed out.")

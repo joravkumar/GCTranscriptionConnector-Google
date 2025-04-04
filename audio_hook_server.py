@@ -29,6 +29,7 @@ from language_mapping import normalize_language_code
 if SPEECH_PROVIDER == 'openai':
     from openai_speech_transcription import StreamingTranscription
 else:
+    # Assuming google_speech_transcription also follows the one-instance-per-channel model
     from google_speech_transcription import StreamingTranscription
 
 from google_gemini_translation import translate_with_gemini
@@ -337,12 +338,22 @@ class AudioHookServer:
 
         self.logger.info(f"Initializing {channels} transcription channel(s) using {SPEECH_PROVIDER} provider with input language {self.input_language}")
 
-        # Initialize streaming transcription for each channel as mono using the input language
-        # Pass the logger instance to the transcription class
-        self.streaming_transcriptions = [StreamingTranscription(self.input_language, 1, self.logger.getChild(f"TranscriptionChannel_{i}")) for i in range(channels)]
-        for transcription in self.streaming_transcriptions:
+        # Initialize one streaming transcription instance *per channel*
+        # Each instance will handle only its own audio stream (effectively mono)
+        self.streaming_transcriptions = [
+            StreamingTranscription(
+                language=self.input_language,
+                # channels=1, # This parameter might be removed from StreamingTranscription if each instance is always mono
+                logger=self.logger.getChild(f"TranscriptionChannel_{i}")
+            ) for i in range(channels)
+        ]
+
+        for i, transcription in enumerate(self.streaming_transcriptions):
             transcription.start_streaming()
-        self.process_responses_tasks = [asyncio.create_task(self.process_transcription_responses(channel)) for channel in range(channels)]
+            # Start a separate response processing task for each instance/channel
+            task = asyncio.create_task(self.process_transcription_responses(i)) # Pass channel index 'i'
+            self.process_responses_tasks.append(task)
+
         self.logger.info("Transcription response processing tasks started.")
 
 
@@ -479,13 +490,13 @@ class AudioHookServer:
         self.logger.debug(f"Received audio frame: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
 
         # Determine number of channels from the *negotiated* media
-        channels = len(self.negotiated_media.get("channels", []))
-        if channels == 0:
-            channels = 1 # Should not happen if negotiation succeeded, but safeguard
+        num_negotiated_channels = len(self.negotiated_media.get("channels", []))
+        if num_negotiated_channels == 0:
+            num_negotiated_channels = 1 # Should not happen if negotiation succeeded, but safeguard
 
         # For PCMU, each channel is 1 byte per sample time
         # Calculate samples *per channel* in this frame
-        samples_in_frame_per_channel = len(frame_bytes) // channels
+        samples_in_frame_per_channel = len(frame_bytes) // num_negotiated_channels
         samples_before_this_frame = self.total_samples_processed
 
         # Update total samples processed *by the server*
@@ -494,47 +505,64 @@ class AudioHookServer:
 
 
         # Deinterleave stereo audio and feed to respective transcription instances
-        if channels == 2:
+        if num_negotiated_channels == 2:
+            if len(self.streaming_transcriptions) < 2:
+                 self.logger.error("Negotiated 2 channels but only have < 2 transcription instances. Check initialization.")
+                 return
             left_channel_pcmu = frame_bytes[0::2]  # External channel
             right_channel_pcmu = frame_bytes[1::2] # Internal channel
             # Pass the sample count *before* this frame was processed for offset calculation
-            if len(self.streaming_transcriptions) > 0:
-                 self.streaming_transcriptions[0].feed_audio(left_channel_pcmu, 0, samples_before_this_frame)
-            if len(self.streaming_transcriptions) > 1:
-                 self.streaming_transcriptions[1].feed_audio(right_channel_pcmu, 1, samples_before_this_frame)
-        elif channels == 1:
+            # Call feed_audio on the correct instance for each channel
+            self.streaming_transcriptions[0].feed_audio(left_channel_pcmu, samples_before_this_frame)
+            self.streaming_transcriptions[1].feed_audio(right_channel_pcmu, samples_before_this_frame)
+            self.logger.debug(f"Fed L channel ({len(left_channel_pcmu)} bytes) to instance 0, R channel ({len(right_channel_pcmu)} bytes) to instance 1.")
+        elif num_negotiated_channels == 1:
+             if len(self.streaming_transcriptions) < 1:
+                 self.logger.error("Negotiated 1 channel but have 0 transcription instances. Check initialization.")
+                 return
              # Pass the sample count *before* this frame was processed
-             if len(self.streaming_transcriptions) > 0:
-                self.streaming_transcriptions[0].feed_audio(frame_bytes, 0, samples_before_this_frame)
+             self.streaming_transcriptions[0].feed_audio(frame_bytes, samples_before_this_frame)
+             self.logger.debug(f"Fed mono channel ({len(frame_bytes)} bytes) to instance 0.")
         else:
-             self.logger.warning(f"Unsupported number of channels negotiated: {channels}. Ignoring audio frame.")
+             self.logger.warning(f"Unsupported number of channels negotiated: {num_negotiated_channels}. Ignoring audio frame.")
 
         # Keep a small buffer if needed for other purposes, but not primary audio processing
         self.audio_buffer.append(frame_bytes)
         self.last_frame_time = time.time()
 
 
-    async def process_transcription_responses(self, channel):
-        self.logger.info(f"Starting response processing loop for channel {channel}")
+    async def process_transcription_responses(self, channel_index):
+        # This task processes responses for a *specific* channel index (0 or 1)
+        self.logger.info(f"Starting response processing loop for channel_index {channel_index}")
+        if channel_index >= len(self.streaming_transcriptions):
+             self.logger.error(f"Invalid channel_index {channel_index} passed to process_transcription_responses. Max index: {len(self.streaming_transcriptions)-1}")
+             return
+
+        transcription_instance = self.streaming_transcriptions[channel_index]
+
         while self.running:
             try:
-                # The response object might be different depending on the provider
-                response = self.streaming_transcriptions[channel].get_response(channel)
+                # Get response from the specific transcription instance for this channel_index
+                # The get_response method in the instance itself doesn't need the index anymore
+                response = transcription_instance.get_response()
 
                 if response:
-                    self.logger.info(f"Processing transcription response on channel {channel}")
-                    self.logger.debug(f"Response data (channel {channel}): {response}") # Log raw response for debug
+                    self.logger.info(f"Processing transcription response on channel_index {channel_index}")
+                    self.logger.debug(f"Response data (channel_index {channel_index}): {response}") # Log raw response for debug
 
                     if isinstance(response, Exception):
-                        self.logger.error(f"Streaming recognition error received on channel {channel}: {response}")
-                        await self.disconnect_session(reason="error", info=f"Streaming recognition failed on channel {channel}")
-                        break # Exit loop on error
+                        self.logger.error(f"Streaming recognition error received on channel_index {channel_index}: {response}")
+                        # Decide if error is fatal for the whole session
+                        # await self.disconnect_session(reason="error", info=f"Streaming recognition failed on channel {channel_index}")
+                        # break # Exit loop for this channel on error, or maybe continue? For now, log and continue.
+                        await asyncio.sleep(0.1) # Avoid tight loop on continuous errors
+                        continue
 
                     # --- Process Google Response ---
                     if SPEECH_PROVIDER == 'google':
                         # Google response object has 'results' attribute
                         if not hasattr(response, 'results') or not response.results:
-                             self.logger.debug(f"Empty or invalid Google response on channel {channel}")
+                             self.logger.debug(f"Empty or invalid Google response on channel_index {channel_index}")
                              await asyncio.sleep(0.01)
                              continue
 
@@ -559,8 +587,6 @@ class AudioHookServer:
                                      final_lang = dest_lang
 
                             # --- Timing Calculation (Google) ---
-                            # Genesys Spec: Offset is based *only* on samples processed by the server.
-                            # Do NOT subtract any adjustments for pauses/discards.
                             offset_str = "PT0S"
                             duration_str = "PT0S"
                             overall_confidence = 1.0 # Default for non-Chirp2 or if confidence missing
@@ -607,10 +633,8 @@ class AudioHookServer:
                                     overall_confidence = alt.confidence
 
                             else:
-                                # No word timings (e.g., Chirp non-2) - Use approximate timing based on total samples
-                                # This case needs improvement - ideally track samples per utterance for Google too
-                                # For now, provide a basic estimate or zero duration as per original logic
-                                self.logger.warning(f"Google result on channel {channel} lacks word timings. Using approximate overall timing.")
+                                # No word timings (e.g., Chirp non-2)
+                                self.logger.warning(f"Google result on channel_index {channel_index} lacks word timings. Using approximate overall timing.")
                                 # Use total samples processed *up to this point* as a rough offset estimate
                                 # This is NOT ideal but better than zero. Needs refinement.
                                 approx_offset_sec = self.total_samples_processed / 8000.0
@@ -630,7 +654,6 @@ class AudioHookServer:
                             # Build the alternative structure
                             alternative = {
                                 "confidence": overall_confidence,
-                                # Add language only if translation occurred or language detection happened
                                 **({"languages": [final_lang]} if final_lang != self.input_language else {}),
                                 "interpretations": [
                                     {
@@ -640,14 +663,15 @@ class AudioHookServer:
                                     }
                                 ]
                             }
-                            await self._send_transcript_event(channel, result.is_final, offset_str, duration_str, alternative)
+                            # Pass the correct external channel_index
+                            await self._send_transcript_event(channel_index, result.is_final, offset_str, duration_str, alternative)
 
 
                     # --- Process OpenAI Response ---
                     elif SPEECH_PROVIDER == 'openai':
                         # OpenAI response object is our custom MockResult
                         if not hasattr(response, 'results') or not response.results:
-                             self.logger.debug(f"Empty or invalid OpenAI response on channel {channel}")
+                             self.logger.debug(f"Empty or invalid OpenAI response on channel_index {channel_index}")
                              await asyncio.sleep(0.01)
                              continue
 
@@ -720,7 +744,6 @@ class AudioHookServer:
                         # Build the alternative structure
                         alternative = {
                             "confidence": overall_confidence,
-                             # Add language only if translation occurred
                             **({"languages": [final_lang]} if final_lang != self.input_language else {}),
                             "interpretations": [
                                 {
@@ -730,7 +753,8 @@ class AudioHookServer:
                                 }
                             ]
                         }
-                        await self._send_transcript_event(channel, result.is_final, offset_str, duration_str, alternative)
+                        # Pass the correct external channel_index
+                        await self._send_transcript_event(channel_index, result.is_final, offset_str, duration_str, alternative)
 
                     else:
                          self.logger.warning(f"Unknown SPEECH_PROVIDER '{SPEECH_PROVIDER}' encountered in response processing.")
@@ -740,17 +764,20 @@ class AudioHookServer:
                     await asyncio.sleep(0.01)
 
             except asyncio.CancelledError:
-                self.logger.info(f"Response processing task for channel {channel} cancelled.")
+                self.logger.info(f"Response processing task for channel_index {channel_index} cancelled.")
                 break
             except Exception as e:
-                self.logger.error(f"Error in process_transcription_responses loop for channel {channel}: {e}", exc_info=True)
+                self.logger.error(f"Error in process_transcription_responses loop for channel_index {channel_index}: {e}", exc_info=True)
                 # Avoid continuous error loops, wait before retrying
                 await asyncio.sleep(0.1)
-        self.logger.info(f"Exiting response processing loop for channel {channel}")
+        self.logger.info(f"Exiting response processing loop for channel_index {channel_index}")
 
 
-    async def _send_transcript_event(self, channel, is_final, offset_str, duration_str, alternative_data):
+    async def _send_transcript_event(self, channel_index, is_final, offset_str, duration_str, alternative_data):
          """Helper function to construct and send a transcript event."""
+         # Ensure channel_index is an integer 0 or 1 for the event payload
+         payload_channel_id = int(channel_index)
+
          transcript_event = {
             "version": "2",
             "type": "event",
@@ -763,7 +790,7 @@ class AudioHookServer:
                         "type": "transcript",
                         "data": {
                             "id": str(uuid.uuid4()),
-                            "channelId": channel, # Integer channel index
+                            "channelId": payload_channel_id, # Use the integer index
                             "isFinal": is_final,
                             "offset": offset_str,
                             "duration": duration_str,
@@ -773,13 +800,13 @@ class AudioHookServer:
                 ]
             }
         }
-         self.logger.info(f"Sending transcript event to Genesys (channel {channel}, final={is_final})")
+         self.logger.info(f"Sending transcript event to Genesys (channelId {payload_channel_id}, final={is_final})")
          self.logger.debug(f"Transcript Event Data: {format_json(transcript_event)}")
          if await self._send_json(transcript_event):
             self.server_seq += 1
             self.audio_frames_sent += 1 # Increment count of messages sent to Genesys
          else:
-            self.logger.warning(f"Transcript event dropped for channel {channel} (likely due to rate limiting or connection issue)")
+            self.logger.warning(f"Transcript event dropped for channelId {payload_channel_id} (likely due to rate limiting or connection issue)")
 
 
     async def _send_json(self, msg: dict):

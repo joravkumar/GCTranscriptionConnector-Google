@@ -8,7 +8,6 @@ from datetime import datetime
 import hmac
 import hashlib
 import base64
-import signal
 
 from config import (
     GENESYS_LISTEN_HOST,
@@ -21,6 +20,9 @@ from config import (
 from audio_hook_server import AudioHookServer
 from utils import format_json
 
+# ---------------------------
+# Simple Logging Setup
+# ---------------------------
 if DEBUG == 'true':
     logging.basicConfig(level=logging.DEBUG)
 else:
@@ -28,6 +30,7 @@ else:
 
 logger = logging.getLogger("GenesysGoogleBridge")
 
+# Updated import: get the protocol from websockets.server (websockets 15.0)
 from websockets.server import WebSocketServerProtocol
 
 class CustomWebSocketServerProtocol(WebSocketServerProtocol):
@@ -39,6 +42,12 @@ class CustomWebSocketServerProtocol(WebSocketServerProtocol):
             raise
 
 async def validate_request(connection, request):
+    """
+    This function is called by websockets.serve() to validate the HTTP request
+    before upgrading to a WebSocket.
+    Signature verification is disabled; only the API key is required.
+    """
+    # Added health endpoint support for Digital Ocean health checks
     if request.path == "/health":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
     
@@ -141,14 +150,11 @@ async def validate_request(connection, request):
     logger.info("="*50)
     return None
 
-connections = {}
-
 async def handle_genesys_connection(websocket):
     connection_id = str(uuid.uuid4())[:8]
     logger.info(f"\n{'='*50}\n[WS-{connection_id}] New WebSocket connection handler started")
 
     session = None
-    connections[connection_id] = websocket
 
     try:
         logger.info(f"Received WebSocket connection from {websocket.remote_address}")
@@ -169,6 +175,7 @@ async def handle_genesys_connection(websocket):
         logger.info(f"[WS-{connection_id}] Starting main message loop")
         while session.running:
             try:
+                logger.debug(f"[WS-{connection_id}] Waiting for next message...")
                 msg = await websocket.recv()
                 if isinstance(msg, bytes):
                     logger.debug(f"[WS-{connection_id}] Received binary frame: {len(msg)} bytes")
@@ -193,50 +200,18 @@ async def handle_genesys_connection(websocket):
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
-        
+        if session and hasattr(session, 'openai_client') and session.openai_client:
+            await session.openai_client.close()
+        logger.info(f"[WS-{connection_id}] Session cleanup complete")
     except Exception as e:
         logger.error(f"[WS-{connection_id}] Fatal connection error: {e}", exc_info=True)
         if session is None:
             session = AudioHookServer(websocket)
         await session.disconnect_session(reason="error", info=f"Internal error: {str(e)}")
     finally:
-        if connection_id in connections:
-            del connections[connection_id]
-        if session and session.running:
-            await session.disconnect_session(reason="completed", info="Server shutting down")
         logger.info(f"[WS-{connection_id}] Connection handler finished\n{'='*50}")
 
-server = None
-
-async def shutdown(signal, loop):
-    logger.info(f"Received shutdown signal: {signal.name}...")
-    if server:
-        logger.info("Closing websocket server")
-        server.close()
-        await server.wait_closed()
-    
-    tasks = []
-    for conn_id, ws in list(connections.items()):
-        logger.info(f"Closing connection {conn_id}")
-        try:
-            await ws.close(code=1001, reason="Server shutting down")
-        except Exception as e:
-            logger.error(f"Error closing connection {conn_id}: {e}")
-    
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    logger.info(f"Cancelling {len(tasks)} outstanding tasks")
-    for task in tasks:
-        task.cancel()
-    
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    logger.info("Shutdown complete")
-    loop.stop()
-
 async def main():
-    global server
-    
     startup_msg = f"""
 {'='*80}
 Genesys-OpenAIBridge Server
@@ -252,11 +227,12 @@ Path: {GENESYS_PATH}
     if DEBUG != 'true':
         websockets_logger.setLevel(logging.INFO)
 
+    # Monkey-patch the default protocol in the server.
     import websockets.server
     websockets.server.WebSocketServerProtocol = CustomWebSocketServerProtocol
 
     try:
-        server = await websockets.serve(
+        async with websockets.serve(
             handle_genesys_connection,
             GENESYS_LISTEN_HOST,
             int(GENESYS_LISTEN_PORT),
@@ -264,25 +240,15 @@ Path: {GENESYS_PATH}
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
-        )
-        
-        logger.info(
-            f"Server is listening for Genesys AudioHook connections on "
-            f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH}"
-        )
-        
-        loop = asyncio.get_running_loop()
-        
-        signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-        for s in signals:
-            loop.add_signal_handler(
-                s, lambda s=s: asyncio.create_task(shutdown(s, loop))
+        ):
+            logger.info(
+                f"Server is listening for Genesys AudioHook connections on "
+                f"ws://{GENESYS_LISTEN_HOST}:{GENESYS_LISTEN_PORT}{GENESYS_PATH}"
             )
-            
-        try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            logger.info("Server shutdown initiated")
+            try:
+                await asyncio.Future()  # run forever
+            except asyncio.CancelledError:
+                logger.info("Server shutdown initiated")
     except Exception as e:
         logger.error(f"Failed to start server: {e}", exc_info=True)
         raise

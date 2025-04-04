@@ -520,15 +520,9 @@ class AudioHookServer:
                     # Default confidence value
                     overall_confidence = default_confidence
                     
-                    # If using Google with Chirp 2, use the actual confidence
-                    from config import GOOGLE_SPEECH_MODEL
-                    if self.speech_provider.lower() == 'google' and GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
-                    # If using OpenAI, we already set a reasonable confidence value
-                    elif self.speech_provider.lower() == 'openai':
-                        if hasattr(alt, "confidence") and alt.confidence is not None:
-                            overall_confidence = alt.confidence
+                    # If the model has confidence information, use it
+                    if hasattr(alt, "confidence") and alt.confidence is not None:
+                        overall_confidence = alt.confidence
                     
                     # Build tokens based on whether translation is enabled and whether we have word-level data
                     if self.enable_translation:
@@ -573,14 +567,8 @@ class AudioHookServer:
                                 
                                 # Get word confidence
                                 word_confidence = default_confidence
-                                # Properly handle word confidence values based on provider and model
-                                from config import GOOGLE_SPEECH_MODEL
-                                if self.speech_provider.lower() == 'google' and GOOGLE_SPEECH_MODEL.lower() == 'chirp_2':
-                                    if hasattr(w, "confidence") and w.confidence is not None:
-                                        word_confidence = w.confidence
-                                elif self.speech_provider.lower() == 'openai':
-                                    if hasattr(w, "confidence") and w.confidence is not None:
-                                        word_confidence = w.confidence
+                                if hasattr(w, "confidence") and w.confidence is not None:
+                                    word_confidence = w.confidence
                                     
                                 tokens.append({
                                     "type": "word",

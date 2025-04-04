@@ -469,23 +469,14 @@ class AudioHookServer:
                     
                     if use_word_timings:
                         # We have word-level timings 
-                        overall_start = alt.words[0].start_offset.total_seconds()
-                        overall_end = alt.words[-1].end_offset.total_seconds()
+                        overall_start = alt.words[0].start_offset.total_seconds() - adjustment_seconds
+                        overall_end = alt.words[-1].end_offset.total_seconds() - adjustment_seconds
                         overall_duration = overall_end - overall_start
                     else:
-                        # No word-level timings - should never happen as we always create synthetic timings
-                        self.logger.warning("No word-level timings found, using fallback")
+                        # No word-level timings
                         overall_start = (self.total_samples - self.offset_adjustment) / 8000.0
-                        overall_duration = 1.0  # Default duration
+                        overall_duration = 0.0
     
-                    # Apply the offset adjustment to the overall start time
-                    # For both Google and OpenAI, we want to subtract the adjustment
-                    overall_start -= adjustment_seconds
-                    
-                    # Ensure we don't have negative start times
-                    if overall_start < 0:
-                        overall_start = 0
-                    
                     offset_str = f"PT{overall_start:.2f}S"
                     duration_str = f"PT{overall_duration:.2f}S"
     
@@ -538,13 +529,8 @@ class AudioHookServer:
                         if use_word_timings:
                             tokens = []
                             for w in alt.words:
-                                # Get absolute token offset time, then subtract the adjustment
                                 token_offset = w.start_offset.total_seconds() - adjustment_seconds
                                 token_duration = w.end_offset.total_seconds() - w.start_offset.total_seconds()
-                                
-                                # Ensure we don't have negative token offsets 
-                                if token_offset < 0:
-                                    token_offset = 0
                                 
                                 # Get word confidence
                                 word_confidence = default_confidence
@@ -614,7 +600,7 @@ class AudioHookServer:
                     else:
                         self.logger.debug("Transcript event dropped due to rate limiting")
             else:
-                await asyncio.sleep(0.01)    
+                await asyncio.sleep(0.01)
 
     async def _send_json(self, msg: dict):
         try:

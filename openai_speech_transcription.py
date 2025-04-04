@@ -378,7 +378,7 @@ class StreamingTranscription:
                     form_data.add_field('prompt', prompt)
                 
                 full_transcript = ""
-                words = []
+                tokens_with_confidence = []  # Track tokens with their confidence scores
                 avg_confidence = 0.9  # Default confidence score
                 confidence_sum = 0
                 confidence_count = 0
@@ -411,6 +411,9 @@ class StreamingTranscription:
                                                         token_logprob = logprob.get('logprob', 0)
                                                         token_confidence = min(0.99, math.exp(token_logprob))
                                                         
+                                                        # Store token with its confidence
+                                                        tokens_with_confidence.append((token, token_confidence))
+                                                        
                                                         # Track low confidence tokens for filtering
                                                         if token_confidence < self.token_confidence_threshold:
                                                             low_confidence_tokens.append(token)
@@ -424,10 +427,18 @@ class StreamingTranscription:
                                                 
                                                 # Process final logprobs if available
                                                 if 'logprobs' in event_json and event_json['logprobs']:
+                                                    # Clear previous tokens and start fresh with the final version
+                                                    tokens_with_confidence = []
+                                                    confidence_sum = 0
+                                                    confidence_count = 0
+                                                    
                                                     for logprob in event_json['logprobs']:
                                                         token = logprob.get('token', '')
                                                         token_logprob = logprob.get('logprob', 0)
                                                         token_confidence = min(0.99, math.exp(token_logprob))
+                                                        
+                                                        # Store token with its confidence
+                                                        tokens_with_confidence.append((token, token_confidence))
                                                         
                                                         if token_confidence < self.token_confidence_threshold:
                                                             low_confidence_tokens.append(token)
@@ -450,11 +461,19 @@ class StreamingTranscription:
                                 self.logger.debug(f"Original transcript: {full_transcript}")
                                 self.logger.debug(f"Filtered transcript: {filtered_transcript}")
                                 self.logger.debug(f"Average confidence: {avg_confidence}")
+                                self.logger.debug(f"Number of tokens with confidence: {len(tokens_with_confidence)}")
                                 if low_confidence_tokens:
                                     self.logger.debug(f"Low confidence tokens: {', '.join(low_confidence_tokens)}")
                                 
-                                # Create response object with accurate position tracking
-                                return self.create_response_object(filtered_transcript, avg_confidence, current_position, audio_duration, channel)
+                                # Create response object with accurate position tracking and varying confidence scores
+                                return self.create_response_object(
+                                    filtered_transcript, 
+                                    avg_confidence, 
+                                    current_position, 
+                                    audio_duration, 
+                                    channel, 
+                                    tokens_with_confidence
+                                )
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")
@@ -471,7 +490,7 @@ class StreamingTranscription:
             self.logger.error(f"Error in stream_transcribe_audio: {str(e)}")
             return None
 
-    def create_response_object(self, transcript, confidence, current_position, audio_duration, channel=0):
+    def create_response_object(self, transcript, confidence, current_position, audio_duration, channel=0, tokens_with_confidence=None):
         if not transcript:
             return None
             
@@ -491,23 +510,73 @@ class StreamingTranscription:
             # current_position is already tracked correctly in the audio timeline
             abs_start_time = current_position / self.sample_rate
             
-            # Generate accurate word-level timestamps
+            # Variable to track if we have token-level confidence information
+            has_token_confidence = tokens_with_confidence and len(tokens_with_confidence) > 0
+            
+            # Calculate word-level confidence scores from token confidence when available
+            if has_token_confidence:
+                # This is a bit complex because OpenAI tokens don't align perfectly with words
+                # We'll do a simple heuristic mapping from tokens to words
+                word_confidences = []
+                
+                # First, a simple approach is to evenly distribute tokens across words
+                if len(tokens_with_confidence) >= len(text_words):
+                    # We have at least as many tokens as words, so we can distribute them
+                    tokens_per_word = len(tokens_with_confidence) / len(text_words)
+                    
+                    for i in range(len(text_words)):
+                        # Calculate the start and end indices for tokens that might contribute to this word
+                        start_idx = int(i * tokens_per_word)
+                        end_idx = int((i + 1) * tokens_per_word)
+                        
+                        # Get confidence scores for these tokens
+                        token_confs = [conf for _, conf in tokens_with_confidence[start_idx:end_idx]]
+                        
+                        if token_confs:
+                            # Average the token confidences for this word
+                            word_confidences.append(sum(token_confs) / len(token_confs))
+                        else:
+                            # Fallback if no tokens map to this word
+                            word_confidences.append(confidence)
+                else:
+                    # We have fewer tokens than words, so we'll need to use the overall confidence
+                    self.logger.debug(f"Fewer tokens than words: {len(tokens_with_confidence)} tokens, {len(text_words)} words")
+                    word_confidences = [confidence] * len(text_words)
+            else:
+                # No token confidence available, use overall confidence for all words
+                word_confidences = [confidence] * len(text_words)
+            
+            # Ensure we have a confidence score for each word
+            if len(word_confidences) != len(text_words):
+                self.logger.warning(f"Word confidence mismatch: {len(word_confidences)} confidences, {len(text_words)} words")
+                word_confidences = [confidence] * len(text_words)
+            
+            # Generate accurate word-level timestamps with varying confidence scores
             for i, word_text in enumerate(text_words):
                 # Calculate start and end time relative to the utterance start time
                 word_start_time = abs_start_time + (i * avg_duration)
                 word_end_time = abs_start_time + ((i + 1) * avg_duration)
                 
+                # Use the word-specific confidence score
+                word_confidence = word_confidences[i]
+                
                 word = Word(
                     word=word_text,
                     start_offset=timedelta(seconds=word_start_time),
                     end_offset=timedelta(seconds=word_end_time),
-                    confidence=confidence
+                    confidence=word_confidence
                 )
                 words.append(word)
+            
+            # Log a sample of the word confidences to verify they're varying
+            if has_token_confidence and len(text_words) > 0:
+                sample_size = min(5, len(text_words))
+                sample_words = [(text_words[i], word_confidences[i]) for i in range(sample_size)]
+                self.logger.debug(f"Sample word confidences: {sample_words}")
         
         alternative = Alternative(
             transcript=transcript,
-            confidence=confidence,
+            confidence=confidence,  # Overall confidence for the whole transcript
             words=words
         )
         

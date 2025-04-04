@@ -15,6 +15,8 @@ The project is designed to be deployed on **Digital Ocean** (or a similar platfo
 - [Transcription and Translation Processing](#transcription-and-translation-processing)
 - [Supported Speech Models](#supported-speech-models)
 - [Language Handling](#language-handling)
+- [Dynamic Transcription Vendor Selection](#dynamic-transcription-vendor-selection)
+- [Synthetic Timestamps and Confidence Scores](#synthetic-timestamps-and-confidence-scores)
 - [Deployment](#deployment)
   - [Digital Ocean App Platform Configuration](#digital-ocean-app-platform-configuration)
 - [Prerequisites](#prerequisites)
@@ -44,7 +46,7 @@ The server accepts WebSocket connections from Genesys Cloud (the AudioHook clien
 
 4. **Transcription via Google Cloud Speech-to-Text or OpenAI Speech-to-Text:**  
    - Sends PCM16 audio to either Google Cloud Speech-to-Text API or OpenAI's Speech-to-Text API for transcription in the source language.
-   - The Speech provider is configurable via the `SPEECH_PROVIDER` environment variable.
+   - The transcription vendor can be specified in the open message via `customConfig.transcriptionVendor`, with fallback to the environment variable.
 
 5. **Translation via Google Gemini (Optional):**  
    - If enabled via `customConfig.enableTranslation` in the open message, translates the transcribed text to the destination language using Google Gemini (see 'enableTranslation' in 'Language Handling' section).
@@ -153,6 +155,7 @@ The application is built around the following core components:
   - Session lifecycle (open, ping, close, etc.).
   - Audio frame processing, control message handling, and rate limiting.
   - Transcription and (optionally) translation event sending back to Genesys Cloud.
+  - Dynamic loading of transcription providers based on customConfig.
   - For probe connections, the server sends the list of supported languages (as defined in the SUPPORTED_LANGUAGES environment variable) to Genesys Cloud.
   - The server adjusts transcript offsets based on control messages (`paused`, `discarded`, and `resumed`) to ensure that only the processed audio timeline is considered.
 
@@ -171,6 +174,7 @@ The application is built around the following core components:
   - Processes response chunks to build complete transcripts with confidence scores
   - Includes language code mapping from BCP-47 to ISO formats
   - Generates synthetic word-level timing information for compatibility with Genesys AudioHook
+  - Advanced token-to-word confidence mapping for accurate per-word confidence scores
   - Artifact filtering to prevent spurious words/phrases in transcripts
   - Initial frame skipping to avoid connection sounds/beeps
   - Low confidence token filtering
@@ -220,7 +224,7 @@ The application is built around the following core components:
   - These messages adjust an internal offset (tracked as processed audio samples) so that transcription offsets and durations accurately reflect only the audio that was received (excluding any gaps due to pauses or audio loss).
 
 - **Transcription Provider Selection:**
-  - The system dynamically selects the appropriate transcription provider based on the SPEECH_PROVIDER environment variable.
+  - The system dynamically selects the appropriate transcription provider based on `customConfig.transcriptionVendor` with fallback to the `DEFAULT_SPEECH_PROVIDER` environment variable.
   - This selection determines which implementation of StreamingTranscription is instantiated.
 
 - **Google Cloud Transcription:**  
@@ -237,6 +241,7 @@ The application is built around the following core components:
     - Sends audio to OpenAI's API via streaming for real-time results
     - Process chunked responses to build complete transcriptions
     - Extracts confidence scores from logprobs when available
+    - Maps token-level confidence to word-level confidence
     - Generates synthetic word-level timing since OpenAI doesn't provide it
   - Implements safeguards:
     - Timeout-based processing to ensure audio doesn't accumulate indefinitely
@@ -343,6 +348,104 @@ The connector automatically adapts to whichever provider and model is specified 
 - **Translation Toggle:**  
   - The `customConfig.enableTranslation` boolean in the open message controls whether translation is enabled for the session.
   - If disabled or not specified, the server returns the original transcription without translation, using the input language.
+
+---
+
+## Dynamic Transcription Vendor Selection
+
+The server now supports dynamic selection of the transcription vendor on a per-conversation basis:
+
+- **Configuration in Genesys Open Message:**
+  - The transcription vendor can be specified in the "open" message via the `customConfig.transcriptionVendor` field:
+    ```json
+    {
+      "transcriptionVendor": "google",  // or "openai"
+      "inputLanguage": "es-es",
+      "enableTranslation": true
+    }
+    ```
+  - This allows different conversations to use different transcription providers based on specific needs.
+
+- **Default Fallback:**
+  - If not specified, the server falls back to using the `DEFAULT_SPEECH_PROVIDER` environment variable.
+  - This maintains backward compatibility with existing deployments.
+
+- **Dynamic Module Loading:**
+  - The server uses Python's `importlib` module to dynamically load the appropriate transcription provider at runtime.
+  - The `_load_transcription_provider()` method instantiates the correct module after receiving the "open" message.
+
+- **Fault Tolerance:**
+  - If the specified provider fails to load, the system gracefully falls back to the Google provider.
+  - This ensures robustness even if configuration errors occur.
+
+- **Benefits:**
+  - Enables A/B testing between different providers
+  - Allows different language needs to be serviced by different providers
+  - Creates flexibility to use the most appropriate provider for specific scenarios
+  - Eliminates the need for multiple deployments for different provider needs
+
+---
+
+## Synthetic Timestamps and Confidence Scores
+
+### Synthetic Timestamps for OpenAI
+
+Since OpenAI's Speech-to-Text API doesn't provide word-level timing information, the connector generates synthetic timestamps to ensure compatibility with Genesys AudioHook:
+
+- **Audio Position Tracking:**
+  - The system tracks the accurate position of audio in the stream, accounting for paused and discarded segments.
+  - This ensures that even synthetic timestamps accurately reflect the true audio timeline.
+
+- **Utterance-Based Timestamp Generation:**
+  - When speech is detected, the system records the position where the utterance begins.
+  - This position is used as the base timestamp for all words in the utterance.
+  - The utterance duration is calculated based on the number of audio samples processed.
+
+- **Word-Level Distribution:**
+  - The total utterance duration is evenly distributed across all words in the transcript.
+  - Each word is assigned a precise start and end time relative to the utterance start.
+  - For example, with a 3-second utterance containing 6 words, each word would be allocated 0.5 seconds.
+
+- **Timeline Adjustment:**
+  - Timestamps are adjusted based on "paused" and "discarded" messages.
+  - This ensures that reported timestamps exclude periods of silence or discarded audio.
+  - The `offset_adjustment` property tracks the number of samples to adjust in the timeline.
+
+- **Accurate Temporal Alignment:**
+  - The result is synthetic timestamps that closely align with the actual speech.
+  - This provides a realistic visualization in the Genesys Cloud UI.
+  - The timestamps properly account for the complete audio timeline, including gaps and pauses.
+
+### Confidence Scores for OpenAI
+
+The connector now provides more accurate word-level confidence scores for OpenAI transcriptions:
+
+- **Token-Level Logprobs:**
+  - OpenAI's streaming API provides logprobs (log probabilities) for each token.
+  - These represent the model's confidence in each token prediction.
+
+- **Conversion to Confidence Scores:**
+  - Logprobs are converted to confidence scores using the exponential function.
+  - This transforms log probabilities (negative values) to confidence values between 0 and 1.
+  - The transformation is: `confidence = min(0.99, math.exp(logprob))`
+
+- **Token-to-Word Mapping:**
+  - The implementation maps token-level confidence to word-level confidence.
+  - For each word, the system finds corresponding tokens and averages their confidence scores.
+  - When there are more tokens than words (common with OpenAI's tokenization), the system distributes tokens across words proportionally.
+
+- **Fallback Mechanisms:**
+  - If token-to-word mapping isn't possible, the system falls back to using the overall average confidence.
+  - This ensures that every word has a reasonable confidence score even in edge cases.
+
+- **Realistic Confidence Variation:**
+  - This approach results in words having varying confidence scores.
+  - Words that the model is less certain about (unusual terms, proper nouns, etc.) receive lower confidence scores.
+  - This matches the behavior of Google's word-level confidence scores, providing consistent behavior across providers.
+
+- **Low Confidence Filtering:**
+  - Extremely low confidence tokens (below a configurable threshold) are logged.
+  - This helps identify potential issues with audio quality or unusual sounds.
 
 ---
 
@@ -461,7 +564,7 @@ All configurable parameters are defined in `config.py` and loaded from environme
 | GEMINI_API_KEY                  | API key for Google Gemini                                                                     | -                 |
 | OPENAI_API_KEY                  | API key for OpenAI (required for OpenAI provider)                                             | -                 |
 | OPENAI_SPEECH_MODEL             | OpenAI Speech-to-Text model                                                                   | gpt-4o-mini-transcribe |
-| SPEECH_PROVIDER                 | Which speech provider to use ('google' or 'openai')                                           | google            |
+| DEFAULT_SPEECH_PROVIDER         | Default speech provider if not specified in customConfig ('google' or 'openai')               | google            |
 | GENESYS_API_KEY                 | API key for Genesys Cloud Transcription Connector                                             | -                 |
 | GENESYS_ORG_ID                  | Genesys Cloud organization ID                                                                 | -                 |
 | DEBUG                           | Set to "true" for increased logging granularity                                               | false             |

@@ -104,16 +104,21 @@ class StreamingTranscription:
 
         self.token_confidence_threshold = 0.2
         
-        # Track total samples and speech samples processed per channel
+        # Track total samples processed per channel
         self.total_samples = [0 for _ in range(channels)]
-        self.speech_start_samples = [0 for _ in range(channels)]
         
-        # Track audio position for correct timestamps
-        self.audio_position_samples = [0 for _ in range(channels)]
-        self.last_utterance_end_samples = [0 for _ in range(channels)]
+        # Track speech samples processed per channel
+        self.speech_start_samples = [0 for _ in range(channels)]
         
         # Sample rate
         self.sample_rate = 8000
+        
+        # Critical for accurate offset tracking - this now accounts for 
+        # utterance positioning within the complete audio timeline
+        # Track audio position for correct timestamps - these are the *actual* positions
+        # in the audio timeline, not affected by discarded or paused audio
+        self.audio_position_samples = [0 for _ in range(channels)]
+        self.last_utterance_end_samples = [0 for _ in range(channels)]
 
     def start_streaming(self):
         for channel in range(self.channels):
@@ -136,7 +141,7 @@ class StreamingTranscription:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-            frame_size = 800
+            frame_size = 800  # 100ms of audio at 8kHz
             
             while self.running:
                 try:
@@ -146,7 +151,8 @@ class StreamingTranscription:
                             self._process_accumulated_audio(channel, loop)
                         break
                     
-                    # Update total samples processed
+                    # Update total samples processed - these are the raw sample counts
+                    # we receive from the client (before any adjustment)
                     samples_in_chunk = len(audio_chunk) // 2  # 2 bytes per sample in PCM16
                     self.total_samples[channel] += samples_in_chunk
                     
@@ -155,8 +161,6 @@ class StreamingTranscription:
                         self.initial_frames_processed[channel] += 1
                         self.logger.debug(f"Channel {channel}: Skipping initial frame {self.initial_frames_processed[channel]} to avoid startup artifacts")
                         continue
-                    
-                    frame_duration = len(audio_chunk) / 16000.0
                     
                     rms = audioop.rms(audio_chunk, 2)
                     is_current_speech = rms > self.vad_threshold
@@ -170,7 +174,7 @@ class StreamingTranscription:
                         if not self.is_speech[channel] and self.speech_frames[channel] >= 2:
                             self.is_speech[channel] = True
                             self.logger.debug(f"Channel {channel}: Speech detected")
-                            # Record position where speech starts
+                            # Record position where speech starts in the current audio stream
                             self.speech_start_samples[channel] = self.total_samples[channel] - samples_in_chunk
                             
                     else:
@@ -179,21 +183,30 @@ class StreamingTranscription:
                         if self.is_speech[channel]:
                             self.silence_frames[channel] += 1
                             
+                            # End of an utterance detected if silence exceeds threshold
                             if self.silence_frames[channel] >= self.silence_threshold_frames:
                                 self.is_speech[channel] = False
                                 self.logger.debug(f"Channel {channel}: End of speech detected")
-                                # Store audio position at utterance end
+                                
+                                # Set the audio position to the speech start samples
+                                # This ensures that timestamps are relative to the start of speech
                                 self.audio_position_samples[channel] = self.speech_start_samples[channel]
+                                
+                                # Process the accumulated audio to get the transcription
                                 self._process_accumulated_audio(channel, loop)
+                                
                                 # Update last utterance end position
                                 self.last_utterance_end_samples[channel] = self.total_samples[channel]
                     
+                    # Handle timeout-based processing for long utterances
                     current_time = time.time()
                     if current_time - self.last_process_time[channel] > 3.0 and len(self.accumulated_audio[channel]) > frame_size * 30:
                         self.logger.debug(f"Channel {channel}: Processing accumulated audio due to timeout")
+                        # Use appropriate position depending on speech state
                         self.audio_position_samples[channel] = self.speech_start_samples[channel] if self.is_speech[channel] else self.last_utterance_end_samples[channel]
                         self._process_accumulated_audio(channel, loop)
                     
+                    # Handle buffer overflow protection
                     if len(self.accumulated_audio[channel]) > frame_size * 300:
                         self.logger.warning(f"Channel {channel}: Buffer overflow, forcing processing")
                         self.audio_position_samples[channel] = self.speech_start_samples[channel] if self.is_speech[channel] else self.last_utterance_end_samples[channel]
@@ -210,7 +223,7 @@ class StreamingTranscription:
             self.response_queues[channel].put(e)
 
     def _process_accumulated_audio(self, channel, loop):
-        if len(self.accumulated_audio[channel]) < 1600:
+        if len(self.accumulated_audio[channel]) < 1600:  # At least 200ms of audio
             self.logger.debug(f"Accumulated audio too short ({len(self.accumulated_audio[channel])} bytes), skipping")
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
@@ -220,19 +233,26 @@ class StreamingTranscription:
             audio_data = bytes(self.accumulated_audio[channel])
             rms = audioop.rms(audio_data, 2)
             
+            # Skip processing if audio is mostly silence
             if rms < self.vad_threshold * 0.7:
                 self.logger.debug(f"Audio mostly silence (RMS: {rms}), skipping")
                 self.accumulated_audio[channel] = bytearray()
                 self.last_process_time[channel] = time.time()
                 return
                 
+            # Create temporary WAV file for OpenAI API
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
                 self._write_wav_file(temp_wav, audio_data)
                 
                 try:
+                    # This is the critical position value that determines our timestamp offsets
+                    # It should represent the position in the audio stream in samples
                     current_position = self.audio_position_samples[channel]
+                    
+                    # Calculate audio duration in samples
                     audio_duration = len(audio_data) // 2  # bytes to samples
                     
+                    # Process the audio file with OpenAI API
                     result = loop.run_until_complete(
                         self.stream_transcribe_audio(temp_wav.name, channel, current_position, audio_duration)
                     )
@@ -242,22 +262,26 @@ class StreamingTranscription:
                         if result.results and result.results[0].alternatives:
                             transcript_text = result.results[0].alternatives[0].transcript
                         
+                        # Filter out any artifacts in the transcript
                         filtered_transcript = self._filter_spurious_artifacts(transcript_text)
                         
                         if result.results and result.results[0].alternatives and filtered_transcript:
                             result.results[0].alternatives[0].transcript = filtered_transcript
                         
+                        # Only send non-duplicate transcripts
                         if filtered_transcript and filtered_transcript != self.last_transcripts[channel]:
                             self.response_queues[channel].put(result)
                             self.last_transcripts[channel] = filtered_transcript
                 except Exception as e:
                     self.logger.error(f"Error in OpenAI streaming transcription: {e}")
                 finally:
+                    # Clean up temporary file
                     try:
                         os.unlink(temp_wav.name)
                     except:
                         pass
                         
+            # Reset accumulated audio buffer
             self.accumulated_audio[channel] = bytearray()
             self.last_process_time[channel] = time.time()
         except Exception as e:
@@ -269,9 +293,11 @@ class StreamingTranscription:
         if not transcript:
             return transcript
             
+        # Apply regex patterns to remove known artifacts
         for pattern in ARTIFACT_PATTERNS:
             transcript = re.sub(pattern, "", transcript)
             
+        # Remove exact matches of known artifacts
         for artifact in KNOWN_ARTIFACTS:
             if transcript.strip() == artifact:
                 return ""
@@ -279,6 +305,7 @@ class StreamingTranscription:
             if transcript.strip().startswith(artifact + " "):
                 transcript = transcript.replace(artifact + " ", "", 1)
             
+        # Normalize whitespace
         transcript = re.sub(r'\s+', ' ', transcript).strip()
         
         return transcript
@@ -288,6 +315,7 @@ class StreamingTranscription:
         channels = 1
         sample_width = 2
         
+        # Write WAV header
         temp_wav.write(b'RIFF')
         temp_wav.write((36 + len(audio_data)).to_bytes(4, 'little'))
         temp_wav.write(b'WAVE')
@@ -301,6 +329,7 @@ class StreamingTranscription:
         temp_wav.write((channels * sample_width).to_bytes(2, 'little'))
         temp_wav.write((sample_width * 8).to_bytes(2, 'little'))
         
+        # Write audio data
         temp_wav.write(b'data')
         temp_wav.write(len(audio_data).to_bytes(4, 'little'))
         temp_wav.write(audio_data)
@@ -313,7 +342,7 @@ class StreamingTranscription:
             if self.is_unsupported_language:
                 self.logger.info(f"Using special handling for unsupported language {self.language}: adding '{self.language_prompt}' to prompt instead of language code")
             else:
-                self.logger.info(f"Simple transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
+                self.logger.info(f"Transcribing audio from channel {channel} with OpenAI model {OPENAI_SPEECH_MODEL}")
                 self.logger.info(f"Using language code for OpenAI: '{openai_lang}' (converted from '{self.language}')")
             
             url = "https://api.openai.com/v1/audio/transcriptions"
@@ -333,6 +362,7 @@ class StreamingTranscription:
                 form_data.add_field('include[]', 'logprobs')
                 form_data.add_field('temperature', '0')
                 
+                # Handle language-specific prompting differently for unsupported languages
                 if self.is_unsupported_language:
                     prompt = get_language_specific_prompt(self.language)
                     base_prompt = prompt
@@ -340,6 +370,7 @@ class StreamingTranscription:
                     self.logger.info(f"Using language-specific prompt for {self.language_prompt}: '{prompt}'")
                     form_data.add_field('prompt', prompt)
                 else:
+                    # For supported languages, add the language code to the request
                     if openai_lang:
                         form_data.add_field('language', openai_lang)
                     
@@ -348,7 +379,7 @@ class StreamingTranscription:
                 
                 full_transcript = ""
                 words = []
-                avg_confidence = 0.9
+                avg_confidence = 0.9  # Default confidence score
                 confidence_sum = 0
                 confidence_count = 0
                 low_confidence_tokens = []
@@ -373,12 +404,14 @@ class StreamingTranscription:
                                                 delta = event_json.get('delta', '')
                                                 full_transcript += delta
                                                 
+                                                # Process logprobs for confidence scores if available
                                                 if 'logprobs' in event_json:
                                                     for logprob in event_json['logprobs']:
                                                         token = logprob.get('token', '')
                                                         token_logprob = logprob.get('logprob', 0)
                                                         token_confidence = min(0.99, math.exp(token_logprob))
                                                         
+                                                        # Track low confidence tokens for filtering
                                                         if token_confidence < self.token_confidence_threshold:
                                                             low_confidence_tokens.append(token)
                                                             self.logger.debug(f"Low confidence token: '{token}' with confidence {token_confidence:.4f}")
@@ -389,6 +422,7 @@ class StreamingTranscription:
                                             elif event_type == 'transcript.text.done':
                                                 full_transcript = event_json.get('text', '')
                                                 
+                                                # Process final logprobs if available
                                                 if 'logprobs' in event_json and event_json['logprobs']:
                                                     for logprob in event_json['logprobs']:
                                                         token = logprob.get('token', '')
@@ -406,9 +440,11 @@ class StreamingTranscription:
                                             self.logger.warning(f"Failed to parse streaming event: {event_data}")
                                             continue
                                 
+                                # Calculate average confidence
                                 if confidence_count > 0:
                                     avg_confidence = confidence_sum / confidence_count
                                 
+                                # Filter out spurious artifacts from the transcript
                                 filtered_transcript = self._filter_spurious_artifacts(full_transcript)
                                 
                                 self.logger.debug(f"Original transcript: {full_transcript}")
@@ -417,7 +453,8 @@ class StreamingTranscription:
                                 if low_confidence_tokens:
                                     self.logger.debug(f"Low confidence tokens: {', '.join(low_confidence_tokens)}")
                                 
-                                return self.create_response_object(filtered_transcript, avg_confidence, current_position, audio_duration)
+                                # Create response object with accurate position tracking
+                                return self.create_response_object(filtered_transcript, avg_confidence, current_position, audio_duration, channel)
                             else:
                                 error_text = await response.text()
                                 self.logger.error(f"OpenAI API error: {response.status} - {error_text}")
@@ -434,7 +471,7 @@ class StreamingTranscription:
             self.logger.error(f"Error in stream_transcribe_audio: {str(e)}")
             return None
 
-    def create_response_object(self, transcript, confidence, current_position, audio_duration):
+    def create_response_object(self, transcript, confidence, current_position, audio_duration, channel=0):
         if not transcript:
             return None
             
@@ -446,12 +483,15 @@ class StreamingTranscription:
         if text_words:
             # Calculate the total audio duration for this utterance
             total_duration = audio_duration / self.sample_rate  # convert samples to seconds
-            # Calculate average word duration
+            
+            # Calculate average word duration (dividing total duration by number of words)
             avg_duration = total_duration / len(text_words)
             
             # Calculate absolute start time based on current_position in samples
+            # current_position is already tracked correctly in the audio timeline
             abs_start_time = current_position / self.sample_rate
             
+            # Generate accurate word-level timestamps
             for i, word_text in enumerate(text_words):
                 # Calculate start and end time relative to the utterance start time
                 word_start_time = abs_start_time + (i * avg_duration)
@@ -483,6 +523,7 @@ class StreamingTranscription:
         if not audio_stream or channel >= self.channels:
             return
         
+        # Convert from PCMU (u-law) to PCM16
         pcm16_data = audioop.ulaw2lin(audio_stream, 2)
         self.audio_queues[channel].put(pcm16_data)
 

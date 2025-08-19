@@ -355,9 +355,7 @@ class AudioHookServer:
             "seq": self.server_seq + 1,
             "clientseq": self.client_seq,
             "id": self.session_id,
-            "parameters": {
-                "summary": ""
-            }
+            "parameters": {}
         }
         if await self._send_json(closed_msg):
             self.server_seq += 1

@@ -1,0 +1,14 @@
+# Global options
+{
+	# Set your email for ACME/Let's Encrypt notifications
+	email you@example.com
+}
+
+# Replace YOUR_DOMAIN with your real domain (e.g., gc-connector.example.com)
+YOUR_DOMAIN {
+    # Optional: enable compression
+    encode gzip
+
+    # Proxy all traffic (including WebSockets) to the app service
+    reverse_proxy gc-transcription-connector:8080
+}

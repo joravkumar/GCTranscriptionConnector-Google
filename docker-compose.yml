@@ -1,0 +1,30 @@
+version: "3.9"
+services:
+  gc-transcription-connector:
+    build: .
+    container_name: gc-transcription-connector
+    env_file:
+      - .env
+    volumes:
+      - ./genesys-stt.json:/app/genesys-stt.json:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    container_name: caddy-proxy
+    depends_on:
+      - gc-transcription-connector
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+    

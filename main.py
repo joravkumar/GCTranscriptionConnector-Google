@@ -31,9 +31,8 @@ else:
 logger = logging.getLogger("GenesysGoogleBridge")
 
 # Updated import: get the protocol from websockets.server (websockets 15.0)
-from websockets.server import WebSocketServerProtocol
-
-class CustomWebSocketServerProtocol(WebSocketServerProtocol):
+from websockets.asyncio.server import serve
+class CustomWebSocketServerProtocol(serve):
     async def handshake(self, *args, **kwargs):
         try:
             return await super().handshake(*args, **kwargs)

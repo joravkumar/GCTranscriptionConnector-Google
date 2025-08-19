@@ -10,7 +10,7 @@ MAX_AUDIO_BUFFER_SIZE = 50
 
 # Server settings
 GENESYS_LISTEN_HOST = "0.0.0.0"
-GENESYS_LISTEN_PORT = "443"
+GENESYS_LISTEN_PORT = os.getenv('GENESYS_LISTEN_PORT', '8080')
 GENESYS_PATH = "/audiohook"
 
 # Google Cloud Speech-to-Text API settings
